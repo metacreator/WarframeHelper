@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate, history, computeSets, LOCALES */
+/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate, history, computeSets, LOCALES, openDialog, t */
 // TEST BUILD ONLY: drives app.html from inside the add-on (WebDriver can't script extension pages)
 // and reports results to the mock server. The runner sets/clears the warframe.market cookie when asked.
 (async () => {
@@ -21,9 +21,10 @@
   const mockJson = async (p) => (await fetch(MOCK + p)).json();
   const click = (sel) => document.querySelector(sel).click();
   let confirmAnswer = true, lastConfirm = '';
-  window.confirm = (msg) => { lastConfirm = msg; return confirmAnswer; };
+  // The page asks through its own dialogs; answer them here.
+  window.uiConfirm = async (msg) => { lastConfirm = msg; return confirmAnswer; };
   let promptAnswer = '1';
-  window.prompt = () => promptAnswer;
+  window.uiPrompt = async () => promptAnswer;
   async function capture(name) {
     try { await browser.tabs.update((await browser.tabs.getCurrent()).id, { active: true }); await post('/_shot', { name, data: await browser.tabs.captureVisibleTab() }); } catch (e) { await report('screenshot ' + name, false, e.message); }
   }
@@ -36,6 +37,7 @@
     }
     await report('host permissions granted at install', true);
     await report('items loaded in add-on', state.items.length > 3000, state.items.length);
+    await sleep(600); await capture('welcome');
     await report('not connected before login', !state.auth.connected, state.auth.reason);
 
     await phase('need-cookie');
@@ -392,6 +394,17 @@
     await until(() => document.querySelector('#scanCard h2').textContent === 'Scan screenshots' && state.names === null, 10000, 'back to English');
     await report('switching back to English restores it', document.querySelector('#tableUnlisted thead th').textContent === 'Item'
       && document.querySelector('#tableListed .item a')?.textContent === 'Akstiletto Prime Blueprint');
+
+    // The row menu and the page's own dialog, for a visual check
+    const rowMenuEl = document.querySelector('#tableListed tr[data-key] details.row-menu');
+    rowMenuEl.scrollIntoView({ block: 'center' });
+    rowMenuEl.open = true;
+    await sleep(400); await capture('row-menu');
+    rowMenuEl.open = false;
+    const dialogAnswer = openDialog(t('Remove every item that is not listed on warframe.market? Listed items and your listings stay.'), { danger: true });
+    await sleep(400); await capture('dialog');
+    document.getElementById('dialog').close('cancel');
+    await report('page dialogs open and answer', (await dialogAnswer) === false && rowMenuEl.querySelectorAll('.menu-item').length >= 3);
 
     // Logging out on the website is noticed
     await phase('need-logout');

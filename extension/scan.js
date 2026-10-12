@@ -766,7 +766,6 @@ function renderShots() {
       h('span', { class: `shot-status ${s.status}` }, status),
       h('button', { class: 'icon', 'data-action': 'remove-shot', title: t('Remove screenshot') }, '✕'));
   }));
-  $('#scanEmpty').hidden = scan.shots.length > 0;
   $('#scanResults').hidden = scan.shots.length === 0;
   const busy = scan.shots.some((s) => BUSY.includes(s.status));
   $('#scanStatus').textContent = busy

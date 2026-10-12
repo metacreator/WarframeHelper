@@ -23,6 +23,7 @@ const state = {
   sales: [],
   sort: { col: 'value', dir: -1 },
   refreshing: false,
+  openMenu: null,       // rowKey whose "⋯" menu is open, so a re-render keeps it open
 };
 
 // ---------- helpers ----------
@@ -91,7 +92,39 @@ const rowKey = (e) => `${e.slug}|${e.rank ?? ''}|${e.subtype ?? ''}`;
 const listQtyOf = (e) => e.listQty ?? e.qty;
 const findEntry = (key) => state.inventory.find((e) => rowKey(e) === key);
 
-function setStatus(text) { $('#status').textContent = text; }
+// The status line is a small toast at the bottom that fades out after a while.
+let statusTimer = null;
+function setStatus(text) {
+  const el = $('#status');
+  el.textContent = text;
+  el.classList.toggle('show', !!text);
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => el.classList.remove('show'), 7000);
+}
+
+// ---------- dialogs (instead of the browser's confirm / prompt) ----------
+
+let dialogQueue = Promise.resolve();
+function openDialog(message, { input = null, danger = false } = {}) {
+  const run = () => new Promise((resolve) => {
+    const dialog = $('#dialog');
+    $('#dialogText').textContent = message;
+    const field = $('#dialogInput');
+    field.hidden = input === null;
+    if (input !== null) Object.assign(field, { value: input.value, max: input.max ?? '' });
+    dialog.classList.toggle('danger', danger);
+    dialog.returnValue = '';
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok' ? (input === null ? true : field.value) : (input === null ? false : null)), { once: true });
+    dialog.showModal();
+    (input !== null ? field : $('#dialogOk')).focus();
+    if (input !== null) field.select();
+  });
+  dialogQueue = dialogQueue.then(run, run);
+  return dialogQueue;
+}
+// Resolve to true/false, and to the typed text or null. message is already translated.
+function uiConfirm(message, options) { return openDialog(message, options); }
+function uiPrompt(message, value) { return openDialog(message, { input: { value } }); }
 
 function ago(ts) {
   const min = Math.round((Date.now() - ts) / 60000);
@@ -296,10 +329,14 @@ function renderAccount() {
     const [before, after] = t('Connected as {name}').split('{name}');
     fill($('#accountText'), before, name, after);
     $('#accountBtn').hidden = true;
+    $('#account').classList.add('connected');
+    $('#stepLogin').classList.add('done');
   } else {
     $('#accountText').textContent = reason === 'checking' ? t('Checking your warframe.market login…')
       : reason === 'no-access' ? t('No access to warframe.market yet') : t('Not logged in on warframe.market');
     $('#accountBtn').hidden = reason === 'no-access' || reason === 'checking';
+    $('#account').classList.remove('connected');
+    $('#stepLogin').classList.remove('done');
   }
 }
 
@@ -399,7 +436,7 @@ async function listEntry(entry) {
   await ensureFreshPrices([entry]);
   const r = buildRow(entry);
   if (!r.sellAt) { setStatus(t('No price yet: type one in "Sell at".')); return; }
-  if (underpriced(r) && !confirm(`${underpricedText(r)}\n\n${t('List at {price}p anyway?', { price: r.sellAt })}`)) return;
+  if (underpriced(r) && !(await uiConfirm(`${underpricedText(r)}\n\n${t('List at {price}p anyway?', { price: r.sellAt })}`, { danger: true }))) return;
   rowAction(entry, t('Listing'), async () => {
     await Backend.createOrder({ slug: entry.slug, platinum: r.sellAt, quantity: listQtyOf(entry), rank: entry.rank, subtype: entry.subtype });
     setStatus(t('Listed {qty}× {name} at {price}p.', { qty: listQtyOf(entry), name: r.name, price: r.sellAt }));
@@ -410,7 +447,7 @@ async function updateEntry(entry) {
   if (!requireAuth()) return;
   await ensureFreshPrices([entry]);
   const r = buildRow(entry);
-  if (r.sellAt !== r.listing.platinum && underpriced(r) && !confirm(`${underpricedText(r)}\n\n${t('Change your listing to {price}p anyway?', { price: r.sellAt })}`)) return;
+  if (r.sellAt !== r.listing.platinum && underpriced(r) && !(await uiConfirm(`${underpricedText(r)}\n\n${t('Change your listing to {price}p anyway?', { price: r.sellAt })}`, { danger: true }))) return;
   rowAction(entry, t('Update'), async () => {
     await Backend.updateOrder(r.listing.id, { platinum: r.sellAt, quantity: listQtyOf(entry) });
     setStatus(t('Updated {name}: {qty}× at {price}p.', { name: r.name, qty: listQtyOf(entry), price: r.sellAt }));
@@ -430,7 +467,7 @@ async function soldEntry(entry, preset) {
   const r = buildRow(entry);
   let qty = preset ?? 1;
   if (preset === undefined && entry.qty > 1) {
-    const answer = prompt(`${t('How many {name} did you sell?', { name: r.name })} (1–${entry.qty})`, '1');
+    const answer = await uiPrompt(`${t('How many {name} did you sell?', { name: r.name })} (1–${entry.qty})`, '1');
     if (answer === null) return;
     qty = Math.round(Number(answer));
     if (!(qty >= 1)) return;
@@ -464,9 +501,9 @@ async function fitListing(entry, left) {
 }
 
 // Asks how many (1–max) when there's a choice; null when cancelled. question is already translated.
-function askCount(question, max, preset = max) {
+async function askCount(question, max, preset = max) {
   if (max <= 1) return max;
-  const answer = prompt(`${question} (1–${max})`, String(preset));
+  const answer = await uiPrompt(`${question} (1–${max})`, String(preset));
   if (answer === null) return null;
   const n = Math.min(max, Math.round(Number(answer)));
   return n >= 1 ? n : null;
@@ -475,7 +512,7 @@ function askCount(question, max, preset = max) {
 // Traded to Baro Ki'Teer for ducats: the items leave the list, and a listing for them shrinks or goes too.
 async function baroEntry(entry) {
   const r = buildRow(entry);
-  const qty = askCount(t("How many {name} did you trade to Baro Ki'Teer?", { name: r.name }), entry.qty);
+  const qty = await askCount(t("How many {name} did you trade to Baro Ki'Teer?", { name: r.name }), entry.qty);
   if (qty === null || !(await fitListing(entry, entry.qty - qty))) return;
   recordSales([{ slug: entry.slug, name: r.item.name, qty, platinum: null, ducats: r.ducats, how: HOW.baro }]);
   removeQuantity(entry, qty);
@@ -495,11 +532,11 @@ async function combineSet(setSlug) {
   const max = Math.min(...info.parts.map((p) => Math.floor((partEntry(p.slug)?.qty ?? 0) / p.quantityInSet)));
   if (!(max >= 1)) return;
   const setName = itemName(set);
-  const n = askCount(t('How many {name} do you want to make?', { name: setName }), max);
+  const n = await askCount(t('How many {name} do you want to make?', { name: setName }), max);
   if (n === null) return;
   const uses = info.parts.map((p) => ({ entry: partEntry(p.slug), qty: p.quantityInSet * n, name: state.bySlug.has(p.slug) ? itemName(state.bySlug.get(p.slug)) : p.slug }));
   const listed = uses.filter((u) => (listingFor(u.entry)?.quantity ?? 0) > u.entry.qty - u.qty);
-  if (!confirm([
+  if (!await uiConfirm([
     t('Combine into {qty}× {name}?', { qty: n, name: setName }),
     t('Uses {parts}. The set gets its own row, ready to list. "Split" on that row undoes this.', { parts: uses.map((u) => `${u.qty}× ${u.name}`).join(', ') }),
     listed.length ? t('Listed separately right now, so those listings will be lowered or removed: {names}', { names: listed.map((u) => u.name).join(', ') }) : '',
@@ -515,7 +552,7 @@ async function splitSet(entry) {
   const info = await Backend.getSet(entry.slug).catch(() => null);
   if (!info) { setStatus(t('Could not load the parts of this set.')); return; }
   const name = itemName(state.bySlug.get(entry.slug));
-  const n = askCount(t('How many {name} do you want to split into parts?', { name }), entry.qty, 1);
+  const n = await askCount(t('How many {name} do you want to split into parts?', { name }), entry.qty, 1);
   if (n === null || !(await fitListing(entry, entry.qty - n))) return;
   removeQuantity(entry, n);
   addEntries(info.parts.map((p) => ({ slug: p.slug, qty: p.quantityInSet * n, rank: null, subtype: null })));
@@ -568,7 +605,7 @@ async function repriceListings() {
     [t('Skipped, price would be too low'), cheap, (r) => t('{name} {price}p vs median {median}p', { name: r.name, price: r.sellAt, median: r.medianSell })],
   ]);
   if (!changes.length) { setStatus(t('All listings are already at their price.') + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
-  if (!confirm(`${t('Change the price of {n} listings?', { n: changes.length })}\n\n`
+  if (!await uiConfirm(`${t('Change the price of {n} listings?', { n: changes.length })}\n\n`
     + changes.slice(0, 20).map((r) => `${r.name}: ${r.listing.platinum}p → ${r.sellAt}p`).join('\n')
     + (changes.length > 20 ? `\n${t('…and {n} more', { n: changes.length - 20 })}` : '')
     + (skipped ? `\n\n${skipped}` : ''))) return;
@@ -627,7 +664,7 @@ async function listAllUnlisted() {
   if (cheap.length) skipped += ' ' + t('List these one by one if you mean it.');
   if (!rows.length) { setStatus(t('Nothing to list.') + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
   const total = rows.reduce((s, r) => s + r.sellAt * listQtyOf(r.e), 0);
-  if (!confirm(`${t('List {n} items on warframe.market for {total}p in total?', { n: rows.length, total: total.toLocaleString() })}\n\n`
+  if (!await uiConfirm(`${t('List {n} items on warframe.market for {total}p in total?', { n: rows.length, total: total.toLocaleString() })}\n\n`
     + rows.slice(0, 15).map((r) => `${listQtyOf(r.e)}× ${r.name}: ${r.sellAt}p`).join('\n')
     + (rows.length > 15 ? `\n${t('…and {n} more', { n: rows.length - 15 })}` : '')
     + (skipped ? `\n\n${skipped}` : ''))) return;
@@ -797,16 +834,27 @@ function historyCell(r, field) {
   return h('span', { class: r.rankKnown ? 'plat' : 'plat stale', title: r.rankKnown ? title : t('At rank 0. Set the rank to see the right history.') }, r.avg7);
 }
 
+// The "⋯" menu of a row: less common actions, out of the way.
+function rowMenu(r, ...items) {
+  const list = items.filter(Boolean);
+  return h('details', { class: 'menu row-menu', open: state.openMenu === r.key },
+    h('summary', { title: t('More actions'), 'aria-label': t('More actions') }, '⋯'),
+    h('div', { class: 'menu-list' }, list));
+}
+
 function listingCell(r) {
   const { e, listing } = r;
   const busy = state.busyRows.has(r.key);
   const button = (action, label, attrs) => h('button', { class: 'small', 'data-action': action, ...attrs }, label);
-  const sold = button('sold', t('Sold'), { class: 'small secondary', disabled: busy,
-    title: listing && state.auth.connected ? t('Remove sold items from your list and close the order on warframe.market') : t('Remove sold items from your list') });
-  const split = r.category === 'Prime Set' && button('split', t('Split'), { class: 'small secondary', title: t('Turn this set back into its parts in your list') });
-  const baro = r.ducats > 0 && button('baro', t('Baro'), { class: 'small secondary',
+  const menuItem = (action, label, attrs) => h('button', { type: 'button', class: 'menu-item', 'data-action': action, ...attrs }, label);
+  const soldTitle = listing && state.auth.connected ? t('Remove sold items from your list and close the order on warframe.market') : t('Remove sold items from your list');
+  const sold = button('sold', t('Sold'), { class: 'small secondary', disabled: busy, title: soldTitle });
+  const soldItem = menuItem('sold', t('Sold'), { disabled: busy, title: soldTitle });
+  const split = r.category === 'Prime Set' && menuItem('split', t('Split'), { title: t('Turn this set back into its parts in your list') });
+  const baro = r.ducats > 0 && menuItem('baro', t('Baro'), {
     title: listing ? t("Traded to Baro Ki'Teer for {n} ducats each: removes them from your list and lowers the listing", { n: r.ducats })
       : t("Traded to Baro Ki'Teer for {n} ducats each: removes them from your list", { n: r.ducats }) });
+  const remove = menuItem('remove', t('Remove from list'), { class: 'menu-item danger' });
 
   if (e.gone) {
     return h('div', { class: 'actions' },
@@ -818,69 +866,86 @@ function listingCell(r) {
 
   if (!listing) {
     const title = !r.rankKnown ? t('Set the rank first') : state.auth.connected ? t('List {qty}× at {price}p', { qty: listQtyOf(e), price: r.sellAt ?? '?' }) : t('Log in on warframe.market to list');
-    return h('div', { class: 'actions' }, dash(), button('list', t('List'), { disabled: !(r.sellAt && r.rankKnown), title }), sold, baro, split);
+    return h('div', { class: 'actions' }, button('list', t('List'), { disabled: !(r.sellAt && r.rankKnown), title }), rowMenu(r, soldItem, baro, split, remove));
   }
 
   const above = r.lowestOther !== null && listing.platinum > r.lowestOther;
   const changed = (!!r.sellAt && r.sellAt !== listing.platinum) || listing.quantity !== listQtyOf(e);
   const hidden = listing.visible === false;
   return h('div', { class: 'actions' },
-    h('span', { class: hidden ? 'muted' : above ? 'bad' : 'good',
+    h('span', { class: `listing-chip${hidden ? ' muted' : above ? ' bad' : ''}`,
       title: hidden ? t('Hidden: still listed, but nobody sees it') : above ? t('Priced above the cheapest other online seller') : t('Competitive') },
-      `${listing.platinum}p ×${listing.quantity}${hidden ? ` (${t('hidden')})` : ''}`),
+      `${listing.platinum}p ×${listing.quantity}${hidden ? ` · ${t('hidden')}` : ''}`),
     state.auth.connected && changed && button('update', t('Update'), { title: t('Change listing to {qty}× at {price}p', { qty: listQtyOf(e), price: r.sellAt }) }),
-    state.auth.connected && button('toggle-visible', hidden ? t('Show') : t('Hide'), { class: 'small secondary',
-      title: hidden ? t('Make this listing visible on warframe.market again') : t('Keep the listing but hide it from buyers') }),
-    state.auth.connected && button('unlist', t('Unlist'), { class: 'small secondary' }),
-    sold, baro, split);
+    sold,
+    rowMenu(r,
+      state.auth.connected && menuItem('toggle-visible', hidden ? t('Show') : t('Hide'),
+        { title: hidden ? t('Make this listing visible on warframe.market again') : t('Keep the listing but hide it from buyers') }),
+      state.auth.connected && menuItem('unlist', t('Unlist')),
+      baro, split, remove));
 }
 
 // Both item tables (not listed / listed) share these columns. Labels are translated when the header is built.
+// optional: can be switched on and off in the Columns menu (shown: on by default); widths are in style.css.
 const COLUMNS = [
-  { label: tk('Item'), sort: 'name' },
-  { label: tk('Qty'), sort: 'qty', right: true, title: tk('How many you own') },
-  { label: tk('Rank / Ref.'), right: true },
-  { label: tk('Lowest sell'), sort: 'lowestSell', right: true, title: tk('Cheapest seller who is online right now') },
-  { label: tk('Median'), sort: 'medianSell', right: true, title: tk('Median of the 5 cheapest online sellers') },
-  { label: tk('7-day avg'), sort: 'avg7', right: true, title: tk('Average price of completed trades over the last 7 days') },
-  { label: tk('Sold/day'), sort: 'perDay', right: true, title: tk('How many were traded per day over the last 7 days: how fast it sells') },
-  { label: tk('Best buy'), sort: 'bestBuy', right: true, title: tk('Highest buy order from an online player — instant sale') },
-  { label: tk('Value'), sort: 'value', right: true, title: tk('Lowest sell × quantity') },
-  { label: tk('Ducats'), sort: 'ducats', right: true },
-  { label: tk('D/P'), sort: 'dpp', right: true, title: tk("Ducats per platinum: high = better to sell to Baro Ki'Teer") },
-  { label: tk('Sell at'), sort: 'sellAt', right: true, title: tk('Your listing price. Leave empty to use the default (cheapest other online seller minus undercut).') },
-  { label: tk('List qty'), right: true, title: tk('How many to put on the market. Leave empty to list all you own.') },
-  { label: tk('Listing'), sort: 'listed' },
-  { label: '' },
+  { key: 'name', label: tk('Item'), sort: 'name' },
+  { key: 'qty', label: tk('Qty'), sort: 'qty', right: true, title: tk('How many you own') },
+  { key: 'rank', label: tk('Rank / Ref.'), right: true },
+  { key: 'lowestSell', label: tk('Lowest sell'), sort: 'lowestSell', right: true, title: tk('Cheapest seller who is online right now') },
+  { key: 'medianSell', label: tk('Median'), sort: 'medianSell', right: true, title: tk('Median of the 5 cheapest online sellers'), optional: true },
+  { key: 'avg7', label: tk('7-day avg'), sort: 'avg7', right: true, title: tk('Average price of completed trades over the last 7 days'), optional: true, shown: true },
+  { key: 'perDay', label: tk('Sold/day'), sort: 'perDay', right: true, title: tk('How many were traded per day over the last 7 days: how fast it sells'), optional: true },
+  { key: 'bestBuy', label: tk('Best buy'), sort: 'bestBuy', right: true, title: tk('Highest buy order from an online player — instant sale'), optional: true },
+  { key: 'value', label: tk('Value'), sort: 'value', right: true, title: tk('Lowest sell × quantity'), optional: true },
+  { key: 'ducats', label: tk('Ducats'), sort: 'ducats', right: true, optional: true },
+  { key: 'dpp', label: tk('D/P'), sort: 'dpp', right: true, title: tk("Ducats per platinum: high = better to sell to Baro Ki'Teer"), optional: true },
+  { key: 'sellAt', label: tk('Sell at'), sort: 'sellAt', right: true, title: tk('Your listing price. Leave empty to use the default (cheapest other online seller minus undercut).') },
+  { key: 'listQty', label: tk('List qty'), right: true, title: tk('How many to put on the market. Leave empty to list all you own.'), optional: true },
+  { key: 'listed', label: tk('Listing'), sort: 'listed' },
 ];
+const COLUMN_WIDTH = { qty: 76, rank: 104, lowestSell: 96, medianSell: 78, avg7: 88, perDay: 80, bestBuy: 80, value: 76, ducats: 72, dpp: 56, sellAt: 90, listQty: 86, listed: 270 };
 
-const tableHeader = () => h('tr', null, COLUMNS.map((c) => h('th', { 'data-sort': c.sort, class: c.right ? 'r' : null, title: c.title ? t(c.title) : null }, c.label ? t(c.label) : '')));
+const tableHeader = () => h('tr', null, COLUMNS.map((c) => h('th', { 'data-sort': c.sort, class: `c-${c.key}${c.right ? ' r' : ''}`, title: c.title ? t(c.title) : null }, t(c.label))));
+
+let shownColumns = new Set(JSON.parse(storageGet('columns', 'null')) ?? COLUMNS.filter((c) => c.shown).map((c) => c.key));
+const columnShown = (c) => !c.optional || shownColumns.has(c.key);
+
+// Hidden columns get display:none; the tables are as wide as the columns shown, plus room for names.
+function applyColumns() {
+  $('#columnStyle').textContent = COLUMNS.filter((c) => !columnShown(c)).map((c) => `table.items .c-${c.key} { display: none; }`).join('\n');
+  const width = 300 + COLUMNS.filter(columnShown).reduce((sum, c) => sum + (COLUMN_WIDTH[c.key] ?? 0), 0);
+  document.querySelectorAll('table.items').forEach((table) => { table.style.minWidth = `${width}px`; });
+}
+
+function renderColumnMenu() {
+  fill($('#columnMenu'), COLUMNS.filter((c) => c.optional).map((c) => h('label', { class: 'check', title: c.title ? t(c.title) : null },
+    h('input', { type: 'checkbox', 'data-column': c.key, checked: shownColumns.has(c.key) }), t(c.label))));
+}
 
 function rowEl(r) {
   const { e, item } = r;
   const tooLow = r.rankKnown && underpriced(r);
-  const cell = (child) => h('td', { class: 'r' }, child);
+  const cell = (key, child) => h('td', { class: `c-${key} r` }, child);
   return h('tr', { 'data-key': r.key, class: e.gone ? 'gone' : null },
-    h('td', null, h('div', { class: 'item' },
+    h('td', { class: 'c-name' }, h('div', { class: 'item' },
       item.thumb ? h('img', { src: ASSETS + item.thumb, alt: '', loading: 'lazy' }) : h('span', { class: 'thumb-missing' }),
       h('a', { href: `https://warframe.market/items/${encodeURIComponent(e.slug)}`, target: '_blank', rel: 'noopener', title: r.name === item.name ? r.name : `${r.name} (${item.name})` }, r.name),
       item.vaulted && h('span', { class: 'tag' }, t('vaulted')))),
-    cell(h('input', { class: 'num', type: 'number', min: 1, value: r.qty, 'data-field': 'qty' })),
-    cell(rankCell(r)),
-    cell(priceCell(r, 'lowestSell')),
-    cell(priceCell(r, 'medianSell')),
-    cell(historyCell(r, 'avg')),
-    cell(historyCell(r, 'perDay')),
-    cell(priceCell(r, 'bestBuy')),
-    cell(r.value === null ? dash() : plat(r.value, 'b')),
-    cell(fmt(r.ducats)),
-    cell(r.dpp === null ? dash() : r.dpp.toFixed(1)),
-    cell(h('input', { class: `num price-input${e.price ? ' custom' : ''}${tooLow ? ' too-low' : ''}`, type: 'number', min: 1, 'data-field': 'price',
+    cell('qty', h('input', { class: 'num', type: 'number', min: 1, value: r.qty, 'data-field': 'qty' })),
+    cell('rank', rankCell(r)),
+    cell('lowestSell', priceCell(r, 'lowestSell')),
+    cell('medianSell', priceCell(r, 'medianSell')),
+    cell('avg7', historyCell(r, 'avg')),
+    cell('perDay', historyCell(r, 'perDay')),
+    cell('bestBuy', priceCell(r, 'bestBuy')),
+    cell('value', r.value === null ? dash() : plat(r.value, 'b')),
+    cell('ducats', fmt(r.ducats)),
+    cell('dpp', r.dpp === null ? dash() : r.dpp.toFixed(1)),
+    cell('sellAt', h('input', { class: `num price-input${e.price ? ' custom' : ''}${tooLow ? ' too-low' : ''}`, type: 'number', min: 1, 'data-field': 'price',
       value: e.price ?? '', placeholder: defaultPrice(r.lowestOther) ?? '', title: tooLow ? underpricedText(r) : t('Empty = cheapest other online seller − undercut') })),
-    cell(h('input', { class: `num${e.listQty ? ' custom' : ''}`, type: 'number', min: 1, max: r.qty, 'data-field': 'listQty',
+    cell('listQty', h('input', { class: `num${e.listQty ? ' custom' : ''}`, type: 'number', min: 1, max: r.qty, 'data-field': 'listQty',
       value: e.listQty ?? '', placeholder: r.qty, title: t('Empty = all {n}', { n: r.qty }) })),
-    h('td', null, listingCell(r)),
-    h('td', null, h('button', { class: 'icon', 'data-action': 'remove', title: t('Remove from list') }, '✕')));
+    h('td', { class: 'c-listed' }, listingCell(r)));
 }
 
 // Each table is split into foldable groups by item type; empty groups are left out.
@@ -902,7 +967,7 @@ function renderGroups(table, rows) {
     const id = `${table.id}:${g.key}`;
     const value = groupRows.reduce((s, r) => s + (r.value ?? 0), 0);
     table.append(h('tbody', { class: `group${foldedGroups.has(id) ? ' folded' : ''}`, 'data-group': id },
-      h('tr', { class: 'group-head', 'data-action': 'toggle-group' }, h('td', { colspan: COLUMNS.length },
+      h('tr', { class: 'group-head', 'data-action': 'toggle-group' }, h('td', { colspan: COLUMNS.filter(columnShown).length }, // hidden columns must not count
         h('span', { class: 'arrow' }),
         h('b', null, t(g.label)),
         h('span', { class: 'count' }, `${t('{n} items', { n: groupRows.length })} · ${value.toLocaleString()}p`))),
@@ -922,7 +987,11 @@ function render() {
   $('#listedSection').hidden = listed.length === 0;
   $('#unlistedSection').hidden = unlisted.length === 0;
 
-  $('#emptyMsg').hidden = state.inventory.length > 0;
+  // A first-time list gets the welcome guide; a filter that hides everything says so.
+  $('#welcome').hidden = state.inventory.length > 0 || state.auth.reason === 'checking';
+  $('#emptyMsg').hidden = rows.length > 0 || !$('#welcome').hidden;
+  $('#emptyMsg').textContent = state.inventory.length ? t('No items match the filters.') : t('No items yet. Scan some screenshots or add items by hand.');
+  renderCategoryChips();
 
   document.querySelectorAll('table.items th[data-sort]').forEach((th) => {
     th.classList.toggle('sorted', th.dataset.sort === state.sort.col);
@@ -934,14 +1003,13 @@ function render() {
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
   const listable = unlisted.filter((r) => r.sellAt && r.rankKnown && !underpriced(r)).length;
   const rankNeeded = unlisted.filter((r) => !r.rankKnown).length;
-  const stat = (label, value, attrs) => h('span', attrs, `${label} `, value instanceof Node ? value : h('b', null, value));
+  const stat = (label, value, attrs) => h('div', { class: 'stat', ...attrs }, h('span', { class: 'stat-label' }, label), value instanceof Node ? value : h('b', null, value));
   fill($('#summary'),
-    stat(t('Rows'), rows.length),
     stat(t('Items'), totalQty),
     stat(t('Market value'), plat(`${totalPlat.toLocaleString()}p`, 'b')),
     stat(t('Ducats'), totalDucats.toLocaleString()),
     stat(t('Not listed yet'), unlisted.length),
-    rankNeeded > 0 && stat(t('Rank needed'), rankNeeded, { class: 'bad', title: t("Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing") }));
+    rankNeeded > 0 && stat(t('Rank needed'), rankNeeded, { class: 'stat bad', title: t("Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing") }));
   $('#listAllBtn').textContent = listable ? `${t('List all unlisted')} (${listable})` : t('List all unlisted');
   const repriceable = repriceTargets(listed).changes.length;
   $('#repriceBtn').textContent = repriceable ? `${t('Reprice listings')} (${repriceable})` : t('Reprice listings');
@@ -1034,7 +1102,7 @@ async function exportBackup() {
 async function importBackup(file) {
   try {
     const data = JSON.parse(await file.text());
-    if (!confirm(t('Replace what is in this browser with the contents of this file? Anything not in the file is lost.'))) return;
+    if (!await uiConfirm(t('Replace what is in this browser with the contents of this file? Anything not in the file is lost.'), { danger: true })) return;
     await saveChain;
     const res = await Backend.importData(data);
     await reloadInventory();
@@ -1072,6 +1140,7 @@ const pageLangCode = () => document.documentElement.dataset.lang || 'en';
 function renderTexts() {
   translatePage();
   document.querySelectorAll('.item-section thead').forEach((thead) => fill(thead, tableHeader()));
+  renderColumnMenu();
   const cat = $('#fCategory').value;
   fill($('#fCategory'), h('option', { value: '' }, t('All categories')),
     Object.entries(CATEGORY_LABELS).map(([value, label]) => h('option', { value }, t(label))));
@@ -1097,7 +1166,79 @@ async function changePageLang(lang) {
 
 // ---------- events ----------
 
+// Category filter as buttons (the select behind them holds the value).
+function renderCategoryChips() {
+  const current = $('#fCategory').value;
+  const chip = (value, label) => h('button', { type: 'button', class: `chip${current === value ? ' active' : ''}`, 'data-category': value }, label);
+  const present = new Set(state.inventory.map((e) => category(state.bySlug.get(e.slug))));
+  fill($('#categoryChips'), chip('', t('All categories')),
+    Object.entries(CATEGORY_LABELS).filter(([value]) => present.has(value)).map(([value, label]) => chip(value, t(label))));
+}
+
+// Drop-down menus open as floating panels, placed under their button so a table or card can't cut them off.
+function placeMenu(details) {
+  const list = details.querySelector('.menu-list');
+  const anchor = details.querySelector('summary').getBoundingClientRect();
+  list.style.top = `${anchor.bottom + 6}px`;
+  list.style.left = '0px';
+  const width = list.offsetWidth;
+  list.style.left = `${Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8, anchor.left > window.innerWidth / 2 ? anchor.right - width : anchor.left))}px`;
+  const height = list.offsetHeight;
+  if (anchor.bottom + 6 + height > window.innerHeight - 8 && anchor.top - height - 6 > 8) list.style.top = `${anchor.top - height - 6}px`;
+}
+
+function wireMenus() {
+  document.addEventListener('toggle', (ev) => {
+    const details = ev.target;
+    if (!details.matches?.('details.menu')) return;
+    if (details.open) {
+      document.querySelectorAll('details.menu[open]').forEach((d) => { if (d !== details) d.open = false; });
+      placeMenu(details);
+    }
+    if (details.classList.contains('row-menu')) {
+      const key = details.closest('tr')?.dataset.key;
+      if (details.open) state.openMenu = key;
+      else if (state.openMenu === key) state.openMenu = null;
+    }
+  }, true);
+  // A click outside closes open menus; picking an action in a row menu closes it too.
+  document.addEventListener('click', (ev) => {
+    const inside = ev.target.closest('details.menu');
+    document.querySelectorAll('details.menu[open]').forEach((d) => {
+      if (d !== inside || ev.target.closest('.menu-item')) d.open = false;
+    });
+  });
+  window.addEventListener('scroll', () => document.querySelectorAll('details.menu[open]').forEach((d) => { d.open = false; }), { passive: true });
+  window.addEventListener('resize', () => document.querySelectorAll('details.menu[open]').forEach(placeMenu));
+}
+
 function wireEvents() {
+  wireMenus();
+
+  // Animated background, on unless switched off here (or the system asks for less motion).
+  const motion = $('#motionToggle');
+  motion.checked = storageGet('motion', 'on') === 'on';
+  document.documentElement.classList.toggle('no-motion', !motion.checked);
+  motion.addEventListener('change', () => {
+    storageSet('motion', motion.checked ? 'on' : 'off');
+    document.documentElement.classList.toggle('no-motion', !motion.checked);
+  });
+
+  $('#columnMenu').addEventListener('change', (ev) => {
+    const key = ev.target.dataset.column;
+    if (!key) return;
+    if (ev.target.checked) shownColumns.add(key); else shownColumns.delete(key);
+    storageSet('columns', JSON.stringify([...shownColumns]));
+    applyColumns();
+    render();
+  });
+  $('#categoryChips').addEventListener('click', (ev) => {
+    const value = ev.target.closest('[data-category]')?.dataset.category;
+    if (value === undefined) return;
+    $('#fCategory').value = value;
+    render();
+  });
+
   // Some items have no working picture on warframe.market; keep the row aligned with a placeholder instead.
   document.addEventListener('error', (ev) => {
     if (ev.target.tagName === 'IMG' && ev.target.closest('.item')) {
@@ -1113,12 +1254,12 @@ function wireEvents() {
     $('#addName').value = '';
     $('#addQty').value = 1;
     $('#addRank').value = '';
-    $('#addName').focus();
+    $('#addMenu').open = false;
   });
 
-  $('#clearBtn').addEventListener('click', () => {
+  $('#clearBtn').addEventListener('click', async () => {
     // Listed items always show, so clearing removes only what isn't listed.
-    if (!confirm(t('Remove every item that is not listed on warframe.market? Listed items and your listings stay.'))) return;
+    if (!await uiConfirm(t('Remove every item that is not listed on warframe.market? Listed items and your listings stay.'), { danger: true })) return;
     state.inventory = state.inventory.filter((e) => listingFor(e));
     saveInventory();
     render();
@@ -1188,7 +1329,7 @@ function wireEvents() {
           // Listed items always show in the list, so removing the row means removing the listing too.
           const name = itemName(state.bySlug.get(entry.slug));
           if (!state.auth.connected) { setStatus(t('{name} is listed on warframe.market. Log in to remove the listing first.', { name })); return; }
-          if (!confirm(t('{name} is listed on warframe.market. Remove the listing and the item from your list?', { name }))) return;
+          if (!await uiConfirm(t('{name} is listed on warframe.market. Remove the listing and the item from your list?', { name }), { danger: true })) return;
           await rowAction(entry, t('Unlist'), () => Backend.deleteOrder(listing.id));
           if (listingFor(entry)) return; // unlisting failed; the error is in the status line
         }
@@ -1270,6 +1411,7 @@ async function init() {
   document.documentElement.dataset.lang = setPageLang(storageGet('pageLang', guessLanguage()));
   state.auth = { connected: false, user: null, reason: 'checking' };
   wireEvents();
+  applyColumns();
   renderTexts();
   setStatus(t('Loading item database…'));
   try {
