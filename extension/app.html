@@ -10,7 +10,7 @@
   <header>
     <div>
       <h1>Tenno Trade Helper</h1>
-      <p class="sub">What's worth selling on <a id="profileLink" href="https://warframe.market" target="_blank" rel="noopener">warframe.market</a></p>
+      <p class="sub">What's worth selling on <a href="https://warframe.market" target="_blank" rel="noopener">warframe.market</a></p>
     </div>
     <div class="header-right">
       <div id="account" class="account">
@@ -125,43 +125,34 @@
         </select>
         <input id="fText" placeholder="Filter by name">
         <label>Min plat <input id="fMin" type="number" min="0" value="0" class="num"></label>
-        <label><input id="fUnlisted" type="checkbox"> Only items not listed yet</label>
       </div>
 
       <div class="row listbar">
         <label title="Default listing price for items where you haven't typed your own">Default price: lowest online
           − <input id="undercut" type="number" min="0" value="0" class="num"> p</label>
         <button id="listAllBtn" type="button">List all unlisted</button>
-        <button id="clearBtn" type="button" class="danger">Clear list</button>
+        <button id="clearBtn" type="button" class="danger" title="Remove everything that is not listed">Clear unlisted</button>
       </div>
 
       <div id="goneBanner" class="banner" hidden></div>
 
       <div id="summary" class="summary"></div>
 
-      <div class="table-wrap">
-        <table id="table">
-          <thead>
-            <tr>
-              <th data-sort="name">Item</th>
-              <th data-sort="category">Type</th>
-              <th data-sort="qty" class="r">Qty</th>
-              <th class="r">Rank / Ref.</th>
-              <th data-sort="lowestSell" class="r" title="Cheapest seller who is online right now">Lowest sell</th>
-              <th data-sort="medianSell" class="r" title="Median of the 5 cheapest online sellers">Median</th>
-              <th data-sort="bestBuy" class="r" title="Highest buy order from an online player — instant sale">Best buy</th>
-              <th data-sort="value" class="r" title="Lowest sell × quantity">Value</th>
-              <th data-sort="ducats" class="r">Ducats</th>
-              <th data-sort="dpp" class="r" title="Ducats per platinum: high = better to sell to Baro Ki'Teer">D/P</th>
-              <th data-sort="sellAt" class="r" title="Your listing price. Leave empty to use the default (lowest online minus undercut).">Sell at</th>
-              <th data-sort="listed">Listing</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-        <p id="emptyMsg" class="empty">No items yet. Scan some screenshots or add items by hand.</p>
-      </div>
+      <p id="emptyMsg" class="empty">No items yet. Scan some screenshots or add items by hand.</p>
+
+      <details id="unlistedSection" class="item-section" open>
+        <summary><h3>Not listed yet</h3> <span class="count" data-count="unlisted"></span></summary>
+        <div class="table-wrap">
+          <table class="items" id="tableUnlisted"><thead></thead><tbody></tbody></table>
+        </div>
+      </details>
+
+      <details id="listedSection" class="item-section" open>
+        <summary><h3>Listed on warframe.market</h3> <span class="count" data-count="listed"></span></summary>
+        <div class="table-wrap">
+          <table class="items" id="tableListed"><thead></thead><tbody></tbody></table>
+        </div>
+      </details>
     </section>
 
     <section class="card" id="setsCard" hidden>

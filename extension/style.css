@@ -194,3 +194,39 @@ td input.num::-webkit-outer-spin-button, td input.num::-webkit-inner-spin-button
 [hidden] { display: none !important; } /* keep "hidden" working on elements styled with display */
 .banner.access { max-width: 1400px; margin: 0 auto 8px; width: calc(100% - 48px); border-color: var(--accent); background: rgba(216, 180, 90, 0.08); display: flex; align-items: center; gap: 12px; justify-content: space-between; }
 #platform { padding: 4px 6px; }
+
+/* Foldable "not listed" / "listed" item sections */
+.item-section { margin-top: 14px; }
+.item-section > summary { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; list-style: none; }
+.item-section > summary::-webkit-details-marker { display: none; }
+.item-section > summary::before { content: "▸"; color: var(--muted); width: 12px; }
+.item-section[open] > summary::before { content: "▾"; }
+.item-section h3 { display: inline; margin: 0; font-size: 15px; }
+.item-section .count { color: var(--muted); font-size: 13px; }
+.thumb-missing { width: 28px; height: 28px; flex: none; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); }
+
+/* Type groups inside each item table */
+tr.group-head td { cursor: pointer; padding: 10px 8px 6px; border-bottom: 1px solid var(--border); background: var(--panel); }
+tr.group-head:hover td { background: var(--panel-2); }
+tr.group-head .count { color: var(--muted); font-size: 12px; margin-left: 8px; font-weight: 400; }
+tr.group-head .arrow::before { content: "▾"; color: var(--muted); display: inline-block; width: 14px; }
+tbody.group.folded tr.group-head .arrow::before { content: "▸"; }
+tbody.group.folded tr:not(.group-head) { display: none; }
+
+/* Same column widths in the "not listed" and "listed" tables, so they line up; the item name takes the rest */
+table.items { table-layout: fixed; min-width: 1160px; }
+table.items th:nth-child(2) { width: 70px; }   /* qty */
+table.items th:nth-child(3) { width: 100px; }  /* rank / refinement */
+table.items th:nth-child(4) { width: 92px; }   /* lowest sell */
+table.items th:nth-child(5) { width: 66px; }   /* median */
+table.items th:nth-child(6) { width: 74px; }   /* best buy */
+table.items th:nth-child(7) { width: 66px; }   /* value */
+table.items th:nth-child(8) { width: 64px; }   /* ducats */
+table.items th:nth-child(9) { width: 48px; }   /* D/P */
+table.items th:nth-child(10) { width: 82px; }  /* sell at */
+table.items th:nth-child(11) { width: 80px; }  /* list qty */
+table.items th:nth-child(12) { width: 220px; } /* listing */
+table.items th:nth-child(13) { width: 36px; }  /* remove */
+table.items td { overflow: hidden; text-overflow: ellipsis; }
+table.items td select { max-width: 100%; }
+table.items .item a { overflow: hidden; text-overflow: ellipsis; }
