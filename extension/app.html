@@ -41,6 +41,7 @@
       </div>
       <p class="hint">Open your in-game Inventory (or the Mods screen), take screenshots while scrolling, and drop them here.
         Overlapping screenshots are fine: an item seen in several screenshots is only counted once.
+        If your game isn't in English, pick its language below first.
         Tip: <kbd>Win</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> then <kbd>Ctrl</kbd>+<kbd>V</kbd> on this page.</p>
 
       <div id="dropZone" class="dropzone">
@@ -49,6 +50,9 @@
       </div>
 
       <div class="row">
+        <label title="The language your game is set to: item names are read in that language">Game language
+          <select id="scanLang"></select>
+        </label>
         <label>Looking for
           <select id="scanCategory">
             <option value="">Any tradable item</option>
@@ -199,6 +203,7 @@
   </main>
 
   <script src="lib/backend.js"></script>
+  <script src="lib/dom.js"></script>
   <script src="app.js"></script>
   <script src="scan.js"></script>
 </body>

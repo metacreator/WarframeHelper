@@ -59,7 +59,7 @@ const Backend = (() => {
   let lastRequest = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  function upstream(method, path, { body, token } = {}) {
+  function upstream(method, path, { body, token, language = 'en' } = {}) {
     const run = async () => {
       const { platform } = await getSettings();
       for (let attempt = 0; attempt < 4; attempt++) {
@@ -72,7 +72,7 @@ const Backend = (() => {
             method,
             credentials: 'omit', // we authenticate with the Authorization header, never cookies
             headers: {
-              'Language': 'en',
+              'Language': language,
               'Platform': platform,
               'Crossplay': 'true',
               'Accept': 'application/json',
@@ -98,14 +98,14 @@ const Backend = (() => {
     return p;
   }
 
-  async function wfm(path, { method = 'GET', body, authed = false } = {}) {
+  async function wfm(path, { method = 'GET', body, authed = false, language } = {}) {
     let token;
     if (authed) {
       const auth = await getAuth();
       if (!auth.connected) throw httpError(401, 'Log in on warframe.market first.');
       token = auth.token;
     }
-    const res = await upstream(method, path, { body, token });
+    const res = await upstream(method, path, { body, token, language });
     if (res.status === 401 && authed) {
       verified = { token: null, user: null };
       throw httpError(401, 'Your warframe.market session ended. Log in on warframe.market again.');
@@ -178,6 +178,18 @@ const Backend = (() => {
     itemIndex = null;
     await store.set('items', itemsCache);
     return items;
+  }
+
+  // Item names in another game language (for reading screenshots of a non-English game), as { slug: name }.
+  async function getItemNames(language) {
+    const key = `itemNames:${language}`;
+    const cached = await store.get(key, null);
+    if (cached && Date.now() - cached.fetchedAt < ITEMS_TTL) return cached.names;
+    const raw = await wfm('/v2/items', { language });
+    const names = {};
+    for (const i of raw) names[i.slug] = i.i18n?.[language]?.name ?? i.i18n?.en?.name ?? i.slug;
+    await store.set(key, { fetchedAt: Date.now(), names });
+    return names;
   }
 
   async function itemIndexes() {
@@ -425,7 +437,7 @@ const Backend = (() => {
     PRICE_TTL_MINUTES,
     getSettings, updateSettings,
     hasAccess, requestAccess, authStatus,
-    getItems, getPrice, cachedPrices, getSet,
+    getItems, getItemNames, getPrice, cachedPrices, getSet,
     getInventory, saveInventory, getSales, addSales,
     checkOrders, createOrder, updateOrder, deleteOrder, closeOrder,
     exportData, importData,

@@ -9,7 +9,7 @@ Scan your Warframe inventory from screenshots, see live warframe.market prices, 
 
 Selling prime parts and mods on warframe.market, without the busywork.
 
-- **Scan your inventory from screenshots.** Take screenshots of your in-game inventory while scrolling and drop them in. Item names and counts are read on your computer, and overlapping screenshots are handled for you.
+- **Scan your inventory from screenshots.** Take screenshots of your in-game inventory while scrolling and drop them in. Item names, counts and relic refinements are read on your computer, and overlapping screenshots are handled for you. Works with the game in English, Ukrainian, Spanish and Chinese (Simplified and Traditional).
 - **See what everything is worth right now:** the cheapest online seller, the median price, the best buy offer, ducats and ducats-per-platinum, plus which complete prime sets you could sell.
 - **List in one click,** at the lowest online price, a few platinum under it, or your own price, and as many as you want to sell. Or list everything at once.
 - **Mark items sold** and they leave your list; the order on warframe.market is closed too. Sales you mark on the website are picked up automatically, with a notification.

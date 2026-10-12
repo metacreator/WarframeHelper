@@ -1,0 +1,387 @@
+{
+  "en": {
+    "font": "Arial",
+    "tiles": [
+      {
+        "slug": "ash_prime_systems_blueprint",
+        "qty": 2,
+        "subtype": null,
+        "text": "Ash Prime Systems Blueprint"
+      },
+      {
+        "slug": "soma_prime_barrel",
+        "qty": 1,
+        "subtype": null,
+        "text": "Soma Prime Barrel"
+      },
+      {
+        "slug": "redeemer_prime_blade",
+        "qty": 3,
+        "subtype": null,
+        "text": "Redeemer Prime Blade"
+      },
+      {
+        "slug": "serration",
+        "qty": 2,
+        "subtype": null,
+        "text": "Serration"
+      },
+      {
+        "slug": "vitality",
+        "qty": 1,
+        "subtype": null,
+        "text": "Vitality"
+      },
+      {
+        "slug": "arcane_energize",
+        "qty": 1,
+        "subtype": null,
+        "text": "Arcane Energize"
+      },
+      {
+        "slug": "nikana_prime_hilt",
+        "qty": 1,
+        "subtype": null,
+        "text": "Nikana Prime Hilt"
+      },
+      {
+        "slug": "mesa_prime_neuroptics_blueprint",
+        "qty": 1,
+        "subtype": null,
+        "text": "Mesa Prime Neuroptics Blueprint"
+      },
+      {
+        "slug": "lex_prime_barrel",
+        "qty": 2,
+        "subtype": null,
+        "text": "Lex Prime Barrel"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": null,
+        "text": "Axi A1 Relic"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": "radiant",
+        "text": "Axi A1 Relic [Radiant]"
+      },
+      {
+        "slug": "galatine_prime_blade",
+        "qty": 1,
+        "subtype": null,
+        "text": "Galatine Prime Blade"
+      }
+    ]
+  },
+  "uk": {
+    "font": "Arial",
+    "tiles": [
+      {
+        "slug": "ash_prime_systems_blueprint",
+        "qty": 2,
+        "subtype": null,
+        "text": "Еш-Прайм: Системи (кресленик)"
+      },
+      {
+        "slug": "soma_prime_barrel",
+        "qty": 1,
+        "subtype": null,
+        "text": "Сома-Прайм: Ствол"
+      },
+      {
+        "slug": "redeemer_prime_blade",
+        "qty": 3,
+        "subtype": null,
+        "text": "Визволитель-Прайм: Клинок"
+      },
+      {
+        "slug": "serration",
+        "qty": 2,
+        "subtype": null,
+        "text": "Зубець"
+      },
+      {
+        "slug": "vitality",
+        "qty": 1,
+        "subtype": null,
+        "text": "Життєвість"
+      },
+      {
+        "slug": "arcane_energize",
+        "qty": 1,
+        "subtype": null,
+        "text": "Містичне Підживлення"
+      },
+      {
+        "slug": "nikana_prime_hilt",
+        "qty": 1,
+        "subtype": null,
+        "text": "Нікана-Прайм: Ефес"
+      },
+      {
+        "slug": "mesa_prime_neuroptics_blueprint",
+        "qty": 1,
+        "subtype": null,
+        "text": "Меса-Прайм: Нейроптика (кресленик)"
+      },
+      {
+        "slug": "lex_prime_barrel",
+        "qty": 2,
+        "subtype": null,
+        "text": "Лекс-Прайм: Ствол"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": null,
+        "text": "Реліквія Аксі A1"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": "radiant",
+        "text": "Реліквія Аксі A1 [Сяйна]"
+      },
+      {
+        "slug": "galatine_prime_blade",
+        "qty": 1,
+        "subtype": null,
+        "text": "Ґалатин-Прайм: Клинок"
+      }
+    ]
+  },
+  "es": {
+    "font": "Arial",
+    "tiles": [
+      {
+        "slug": "ash_prime_systems_blueprint",
+        "qty": 2,
+        "subtype": null,
+        "text": "Plano de Sistemas De Ash Prime"
+      },
+      {
+        "slug": "soma_prime_barrel",
+        "qty": 1,
+        "subtype": null,
+        "text": "Cañón De Soma Prime"
+      },
+      {
+        "slug": "redeemer_prime_blade",
+        "qty": 3,
+        "subtype": null,
+        "text": "Hoja De Redeemer Prime"
+      },
+      {
+        "slug": "serration",
+        "qty": 2,
+        "subtype": null,
+        "text": "Sierra"
+      },
+      {
+        "slug": "vitality",
+        "qty": 1,
+        "subtype": null,
+        "text": "Vitalidad"
+      },
+      {
+        "slug": "arcane_energize",
+        "qty": 1,
+        "subtype": null,
+        "text": "Energizar Arcano"
+      },
+      {
+        "slug": "nikana_prime_hilt",
+        "qty": 1,
+        "subtype": null,
+        "text": "Empuñadura De Nikana Prime"
+      },
+      {
+        "slug": "mesa_prime_neuroptics_blueprint",
+        "qty": 1,
+        "subtype": null,
+        "text": "Plano de Neurópticas De Mesa Prime"
+      },
+      {
+        "slug": "lex_prime_barrel",
+        "qty": 2,
+        "subtype": null,
+        "text": "Cañón De Lex Prime"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": null,
+        "text": "Reliquia Axi A1"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": "radiant",
+        "text": "Reliquia Axi A1 [Radiante]"
+      },
+      {
+        "slug": "galatine_prime_blade",
+        "qty": 1,
+        "subtype": null,
+        "text": "Hoja De Galatine Prime"
+      }
+    ]
+  },
+  "zh-hans": {
+    "font": "Microsoft YaHei",
+    "tiles": [
+      {
+        "slug": "ash_prime_systems_blueprint",
+        "qty": 2,
+        "subtype": null,
+        "text": "Ash Prime 系统 蓝图"
+      },
+      {
+        "slug": "soma_prime_barrel",
+        "qty": 1,
+        "subtype": null,
+        "text": "月神 Prime 枪管"
+      },
+      {
+        "slug": "redeemer_prime_blade",
+        "qty": 3,
+        "subtype": null,
+        "text": "救赎者 Prime 刀刃"
+      },
+      {
+        "slug": "serration",
+        "qty": 2,
+        "subtype": null,
+        "text": "膛线"
+      },
+      {
+        "slug": "vitality",
+        "qty": 1,
+        "subtype": null,
+        "text": "生命力"
+      },
+      {
+        "slug": "arcane_energize",
+        "qty": 1,
+        "subtype": null,
+        "text": "赋能·充沛"
+      },
+      {
+        "slug": "nikana_prime_hilt",
+        "qty": 1,
+        "subtype": null,
+        "text": "侍刃 Prime 握柄"
+      },
+      {
+        "slug": "mesa_prime_neuroptics_blueprint",
+        "qty": 1,
+        "subtype": null,
+        "text": "Mesa Prime 头部神经光元 蓝图"
+      },
+      {
+        "slug": "lex_prime_barrel",
+        "qty": 2,
+        "subtype": null,
+        "text": "雷克斯 Prime 枪管"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": null,
+        "text": "后纪 A1 遗物"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": "radiant",
+        "text": "后纪 A1 遗物 [光辉]"
+      },
+      {
+        "slug": "galatine_prime_blade",
+        "qty": 1,
+        "subtype": null,
+        "text": "迦伦提恩 Prime 刀刃"
+      }
+    ]
+  },
+  "zh-hant": {
+    "font": "Microsoft JhengHei",
+    "tiles": [
+      {
+        "slug": "ash_prime_systems_blueprint",
+        "qty": 2,
+        "subtype": null,
+        "text": "Ash Prime 系統 藍圖"
+      },
+      {
+        "slug": "soma_prime_barrel",
+        "qty": 1,
+        "subtype": null,
+        "text": "月神 Prime 槍管"
+      },
+      {
+        "slug": "redeemer_prime_blade",
+        "qty": 3,
+        "subtype": null,
+        "text": "救贖者 Prime 刀刃"
+      },
+      {
+        "slug": "serration",
+        "qty": 2,
+        "subtype": null,
+        "text": "膛線"
+      },
+      {
+        "slug": "vitality",
+        "qty": 1,
+        "subtype": null,
+        "text": "生命力"
+      },
+      {
+        "slug": "arcane_energize",
+        "qty": 1,
+        "subtype": null,
+        "text": "充沛賦能"
+      },
+      {
+        "slug": "nikana_prime_hilt",
+        "qty": 1,
+        "subtype": null,
+        "text": "侍刃 Prime 握柄"
+      },
+      {
+        "slug": "mesa_prime_neuroptics_blueprint",
+        "qty": 1,
+        "subtype": null,
+        "text": "Mesa Prime 頭部神經光元 藍圖"
+      },
+      {
+        "slug": "lex_prime_barrel",
+        "qty": 2,
+        "subtype": null,
+        "text": "雷克斯 Prime 槍管"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": null,
+        "text": "後紀 A1 遺物"
+      },
+      {
+        "slug": "axi_a1_relic",
+        "qty": 1,
+        "subtype": "radiant",
+        "text": "後紀 A1 遺物 [光輝]"
+      },
+      {
+        "slug": "galatine_prime_blade",
+        "qty": 1,
+        "subtype": null,
+        "text": "迦倫提恩 Prime 刀刃"
+      }
+    ]
+  }
+}

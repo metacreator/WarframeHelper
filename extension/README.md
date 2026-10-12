@@ -43,15 +43,15 @@ same with `data/sales.json`.
    ```
 3. **Submit a New Add-on** → "On this site" → upload `dist/tenno_trade_helper-<version>.zip`.
 4. When asked about source code: the only minified files are the unmodified third-party libraries listed in
-   `vendor/tesseract/SOURCES.md` (tesseract.js 5.1.1, tesseract.js-core 5.1.1, @tesseract.js-data/eng 1.0.0).
+   `vendor/tesseract/SOURCES.md` (tesseract.js 5.1.1, tesseract.js-core 5.1.1, and the @tesseract.js-data language packages 1.0.0).
    Everything else is plain, unbuilt JavaScript, so no build instructions are needed.
 5. Listing text and privacy policy: see `STORE_LISTING.md` and `../PRIVACY.md`.
 
 To release an update, raise `version` in `manifest.json`, rebuild, and upload the new zip.
 
-`npx web-ext lint` currently reports no errors and some warnings. The warnings are the `Function`
-constructor inside the bundled Tesseract library, and `innerHTML` in the page code. All text that comes
-from warframe.market is escaped before it is inserted into the page.
+`npx web-ext lint` currently reports no errors and 5 warnings, all about the `Function` constructor inside the
+bundled Tesseract library. The page itself never builds HTML from strings: `lib/dom.js` creates elements and
+sets text directly, so text from warframe.market or a screenshot can never become markup.
 
 ## Testing
 
@@ -63,10 +63,11 @@ from warframe.market is escaped before it is inserted into the page.
 | File | Role |
 | --- | --- |
 | `app.html`, `app.js`, `style.css` | The app page (opens in a tab) |
-| `scan.js` | Screenshot reading with the bundled Tesseract OCR |
+| `scan.js` | Screenshot reading with the bundled Tesseract OCR: game in English, Ukrainian, Spanish or Chinese, stack counts, relic refinement, two screenshots at a time |
+| `lib/dom.js` | Builds page elements without HTML strings |
 | `lib/backend.js` | warframe.market requests (rate-limited to 3/s), caching in `browser.storage.local`, login from the `JWT` cookie, sale detection |
 | `background.js` | Toolbar button, opens the app after install, checks for sales every 3 minutes and shows a notification |
-| `vendor/tesseract/` | Unmodified OCR library and English language data |
+| `vendor/tesseract/` | Unmodified OCR library and language data (English, Ukrainian, Spanish, Simplified and Traditional Chinese) |
 
 Permissions: `cookies` + access to `warframe.market` to read your login there; `api.warframe.market` for prices
 and orders; `storage`/`unlimitedStorage` for your list, sales history and the price cache; `alarms` and

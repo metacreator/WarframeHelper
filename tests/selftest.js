@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview */
+/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render */
 // TEST BUILD ONLY: drives app.html from inside the add-on (WebDriver can't script extension pages)
 // and reports results to the mock server. The runner sets/clears the warframe.market cookie when asked.
 (async () => {
@@ -94,12 +94,18 @@
     const files = [];
     for (const n of ['shotA.png', 'shotB.png']) files.push(new File([await (await fetch(`${MOCK}/${n}`)).blob()], n, { type: 'image/png' }));
     const t0 = Date.now();
+    let parallel = 0;
     addShots(files);
-    await until(() => scan.shots.length === 2 && scan.shots.every((s) => s.status === 'done' || s.status === 'error'), 150000, 'scan');
+    await until(() => {
+      parallel = Math.max(parallel, scan.busy.filter(Boolean).length);
+      return scan.shots.length === 2 && scan.shots.every((s) => s.status === 'done' || s.status === 'error');
+    }, 150000, 'scan');
     const errors = scan.shots.filter((s) => s.error).map((s) => s.error);
     const matched = scan.rows.filter((r) => r.item).length;
     await report('scan works with bundled Tesseract (18 matched)', matched === 18 && !errors.length,
       `${((Date.now() - t0) / 1000).toFixed(1)}s, matched ${matched}, counts ${scan.rows.filter((r) => r.qty > 1).map((r) => r.item?.slug + '×' + r.qty).join(' ')} ${errors.join(';')}`);
+    await report('two screenshots are read at the same time', POOL_SIZE < 2 || parallel === 2,
+      `${POOL_SIZE} workers; ${scan.shots.map((s) => `${s.name} ${s.seconds.toFixed(1)}s ${JSON.stringify(s.timings)}`).join(' | ')}`);
     await capture('scan');
     click('#scanAdd');
     await until(() => state.inventory.length === 19, 10000, 'scan rows added');
@@ -139,9 +145,32 @@
       const wrongQty = realRows.filter((r) => r.qty !== 1).map((r) => r.item.slug + '×' + r.qty);
       const missing = want.filter((w) => !realRows.some((r) => r.item.slug === w));
       await report(`real screenshot ${file}: 24 items, all ×1`, realRows.length === 24 && !wrongQty.length && !missing.length,
-        `${realRows.length} items, wrong qty: ${wrongQty.join(' ') || 'none'}, missing: ${missing.join(' ') || 'none'}`);
+        `${realRows.length} items, wrong qty: ${wrongQty.join(' ') || 'none'}, missing: ${missing.join(' ') || 'none'}, ${scan.shots[0].seconds.toFixed(1)}s ${JSON.stringify(scan.shots[0].timings)}`);
     }
     click('#scanClear');
+
+    // Other game languages: names as warframe.market writes them in that language, stack counts, and a
+    // Radiant relic next to an Intact one. English goes last; its result is added to the list further down.
+    const langSpec = await mockJson('/language-shots.json');
+    const langSelect = document.getElementById('scanLang');
+    for (const lang of ['uk', 'es', 'zh-hans', 'zh-hant', 'en']) {
+      click('#scanClear');
+      langSelect.value = lang;
+      langSelect.dispatchEvent(new Event('change'));
+      const file = `lang-${lang}.png`;
+      addShots([new File([await (await fetch(`${MOCK}/${file}`)).blob()], file, { type: 'image/png' })]);
+      await until(() => scan.shots.length === 1 && ['done', 'error'].includes(scan.shots[0].status), 150000, 'language scan ' + lang);
+      const want = langSpec[lang].tiles.map((t) => `${t.slug}|${t.subtype ?? state.bySlug.get(t.slug).subtypes?.[0] ?? ''}×${t.qty}`);
+      const have = scan.rows.filter((r) => r.item && !r.ambiguous).map((r) => `${r.item.slug}|${r.subtype ?? ''}×${r.qty}`);
+      const missing = want.filter((w) => !have.includes(w)), extra = have.filter((x) => !want.includes(x));
+      // Synthetic Cyrillic/Chinese text is harder to read: one name may stay unclear there (the player picks it),
+      // but nothing may be matched to the wrong item, and the Radiant relic must be found.
+      const allowedMissing = ['en', 'es'].includes(lang) ? 0 : 1;
+      await report(`${lang} screenshot: ${12 - allowedMissing}+ of 12 items with counts, the Radiant relic, nothing wrong`,
+        missing.length <= allowedMissing && !extra.length && have.includes('axi_a1_relic|radiant×1') && !scan.shots[0].error,
+        `${scan.shots[0].error ?? ''} missing: ${missing.join(' ') || 'none'}, wrong/extra: ${extra.join(' ') || 'none'}, unclear: ${scan.rows.filter((r) => r.ambiguous || !r.item).map((r) => r.text).join(' / ')}, ${scan.shots[0].seconds.toFixed(1)}s`);
+    }
+    await report('game language remembered', localStorage.getItem('scanLang') === 'en');
 
     // Sold 1 of 2 (prompt answers 1)
     document.querySelector('tr[data-key^="kogake_prime_boot|"] [data-action=sold]').click();
@@ -210,6 +239,13 @@
     const listedNow = (await mockJson('/_orders')).map((o) => state.byId.get(o.itemId)?.slug);
     await report('bulk listing skips rank-unknown and too-low items', listedNow.length === before + 1 && listedNow.includes('soma_prime_barrel')
       && /rank not set.*Vitality/s.test(lastConfirm) && /price looks too low.*Ash Prime Systems Blueprint/s.test(lastConfirm), `${listedNow.join(' ')} | confirm: ${lastConfirm.slice(0, 300)} | status: ${document.getElementById('status').textContent}`);
+
+    // A scanned Radiant relic gets its own row next to the Intact one (the English language scan from above)
+    document.getElementById('scanMode').value = 'add';
+    click('#scanAdd');
+    await until(() => state.inventory.filter((e) => e.slug === 'axi_a1_relic').length === 2, 10000, 'relic rows');
+    await report('Radiant and Intact relics are separate rows', ['intact', 'radiant'].every((s) => state.inventory.some((e) => e.slug === 'axi_a1_relic' && e.subtype === s)),
+      state.inventory.filter((e) => e.slug === 'axi_a1_relic').map((e) => `${e.subtype}×${e.qty}`).join(' '));
 
     // Logging out on the website is noticed
     await phase('need-logout');

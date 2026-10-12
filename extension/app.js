@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Backend */
+/* global browser, Backend, h, fill */
 
 const ASSETS = 'https://warframe.market/static/assets/';
 const $ = (sel) => document.querySelector(sel);
@@ -23,8 +23,9 @@ const state = {
 
 // ---------- helpers ----------
 
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmt = (n) => (n === null || n === undefined ? '<span class="muted">—</span>' : n.toLocaleString());
+const dash = () => h('span', { class: 'muted' }, '—');
+const fmt = (n) => (n === null || n === undefined ? dash() : n.toLocaleString());
+const plat = (n, tag = 'span') => h(tag, { class: 'plat' }, n);
 
 function category(item) {
   const t = item.tags;
@@ -104,8 +105,9 @@ function addEntries(entries, { replace = false, setQty = false } = {}) {
     if (!state.bySlug.has(raw.slug)) continue;
     const e = normalizeEntry(raw);
     let existing = state.inventory.find((x) => rowKey(x) === rowKey(e));
-    // Rank unknown (scans): reuse the single existing row for that item.
-    if (!existing && (raw.rank === null || raw.rank === undefined)) {
+    // Rank unknown (scans): reuse the single existing row for that item. Relics differ by refinement
+    // instead, which scans do give, so a Radiant one never lands on the Intact row.
+    if (!existing && isRanked(state.bySlug.get(e.slug)) && (raw.rank === null || raw.rank === undefined)) {
       const sameItem = state.inventory.filter((x) => x.slug === e.slug);
       if (sameItem.length === 1) existing = sameItem[0];
     }
@@ -226,7 +228,9 @@ function renderAccount() {
   const { connected, user, reason } = state.auth;
   $('#accessBanner').hidden = reason !== 'no-access';
   if (connected) {
-    $('#accountText').innerHTML = `Connected as <a href="https://warframe.market/profile/${encodeURIComponent(user.slug)}" target="_blank" rel="noopener" title="Your warframe.market profile"><b>${esc(user.ingameName ?? user.slug)}</b></a>`;
+    fill($('#accountText'), 'Connected as ',
+      h('a', { href: `https://warframe.market/profile/${encodeURIComponent(user.slug)}`, target: '_blank', rel: 'noopener', title: 'Your warframe.market profile' },
+        h('b', null, user.ingameName ?? user.slug)));
     $('#accountBtn').hidden = true;
   } else {
     $('#accountText').textContent = reason === 'no-access' ? 'No access to warframe.market yet' : 'Not logged in on warframe.market';
@@ -437,14 +441,13 @@ function recordSales(sales) {
 function renderSales() {
   const total = state.sales.reduce((s, x) => s + (x.platinum ?? 0) * x.qty, 0);
   $('#salesSummary').textContent = state.sales.length ? `${state.sales.length} sales · ${total.toLocaleString()}p` : 'nothing sold yet';
-  $('#salesTable tbody').innerHTML = [...state.sales].reverse().map((s) => `<tr>
-    <td class="muted">${esc(new Date(s.at).toLocaleString())}</td>
-    <td>${esc(s.name ?? s.slug)}</td>
-    <td class="r">${s.qty}</td>
-    <td class="r">${s.platinum ? `<span class="plat">${s.platinum}</span>` : fmt(null)}</td>
-    <td class="r">${s.platinum ? `<b class="plat">${s.platinum * s.qty}</b>` : fmt(null)}</td>
-    <td class="muted">${esc(s.how ?? '')}</td>
-  </tr>`).join('');
+  fill($('#salesTable tbody'), [...state.sales].reverse().map((s) => h('tr', null,
+    h('td', { class: 'muted' }, new Date(s.at).toLocaleString()),
+    h('td', null, s.name ?? s.slug),
+    h('td', { class: 'r' }, s.qty),
+    h('td', { class: 'r' }, s.platinum ? plat(s.platinum) : dash()),
+    h('td', { class: 'r' }, s.platinum ? plat(s.platinum * s.qty, 'b') : dash()),
+    h('td', { class: 'muted' }, s.how ?? ''))));
 }
 
 // ---------- table ----------
@@ -515,97 +518,103 @@ function filteredRows() {
 function rankCell(r) {
   const { e, item } = r;
   if (isRanked(item)) {
+    const attrs = { class: 'num', type: 'number', min: 0, max: item.maxRank, 'data-field': 'rank' };
     if (!r.rankKnown) {
-      return `<input class="num needs-rank" type="number" min="0" max="${item.maxRank}" value="" placeholder="?" data-field="rank" title="Rank unknown (screenshots don't show it). Enter 0–${item.maxRank} before listing.">`;
+      return h('input', { ...attrs, class: 'num needs-rank', value: '', placeholder: '?',
+        title: `Rank unknown (screenshots don't show it). Enter 0–${item.maxRank} before listing.` });
     }
-    return `<input class="num" type="number" min="0" max="${item.maxRank}" value="${e.rank}" data-field="rank" title="0–${item.maxRank}">`;
+    return h('input', { ...attrs, value: e.rank, title: `0–${item.maxRank}` });
   }
-  if (item.subtypes) {
-    return `<select data-field="subtype">${item.subtypes.map((s) => `<option${s === e.subtype ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select>`;
-  }
-  return '<span class="muted">—</span>';
+  if (item.subtypes) return h('select', { 'data-field': 'subtype' }, item.subtypes.map((s) => h('option', { selected: s === e.subtype }, s)));
+  return dash();
 }
 
 function priceCell(r, field) {
   const loading = state.loadingPrices.has(r.key);
-  if (loading && !r.price?.fetchedAt) return '<span class="muted">…</span>';
-  if (r.price?.error) return field === 'lowestSell' ? `<span class="bad" title="${esc(r.price.error)}">error</span>` : '';
+  if (loading && !r.price?.fetchedAt) return h('span', { class: 'muted' }, '…');
+  if (r.price?.error) return field === 'lowestSell' ? h('span', { class: 'bad', title: r.price.error }, 'error') : null;
   const v = r[field];
   const stale = r.price && isStale(r.price);
-  const title = r.price?.fetchedAt ? `Fetched ${ago(r.price.fetchedAt)}` : '';
-  if (v === null && field === 'lowestSell' && r.price?.sellers === 0) return `<span class="muted" title="No online sellers right now. ${title}">none online</span>`;
-  if (v === null) return fmt(null);
-  if (!r.rankKnown) return `<span class="plat stale" title="Price at rank 0. Set the rank to see the right price.">${v}</span>`;
-  return `<span class="plat${stale || loading ? ' stale' : ''}" title="${title}">${v}</span>`;
+  const title = r.price?.fetchedAt ? `Fetched ${ago(r.price.fetchedAt)}` : null;
+  if (v === null && field === 'lowestSell' && r.price?.sellers === 0) return h('span', { class: 'muted', title: `No online sellers right now. ${title ?? ''}` }, 'none online');
+  if (v === null) return dash();
+  if (!r.rankKnown) return h('span', { class: 'plat stale', title: 'Price at rank 0. Set the rank to see the right price.' }, v);
+  return h('span', { class: `plat${stale || loading ? ' stale' : ''}`, title }, v);
 }
 
 function listingCell(r) {
   const { e, listing } = r;
   const busy = state.busyRows.has(r.key);
-  const sold = `<button class="small secondary" data-action="sold" title="Remove sold items from your list${listing && state.auth.connected ? ' and close the order on warframe.market' : ''}"${busy ? ' disabled' : ''}>Sold</button>`;
+  const button = (action, label, attrs) => h('button', { class: 'small', 'data-action': action, ...attrs }, label);
+  const sold = button('sold', 'Sold', { class: 'small secondary', disabled: busy,
+    title: `Remove sold items from your list${listing && state.auth.connected ? ' and close the order on warframe.market' : ''}` });
 
   if (e.gone) {
-    return `<div class="actions"><span class="bad" title="This listing (${e.gone.quantity}× at ${e.gone.platinum}p) is no longer on warframe.market">Listing gone. Sold?</span>
-      <button class="small" data-action="gone-sold">Yes, sold</button>
-      <button class="small secondary" data-action="gone-keep">No</button></div>`;
+    return h('div', { class: 'actions' },
+      h('span', { class: 'bad', title: `This listing (${e.gone.quantity}× at ${e.gone.platinum}p) is no longer on warframe.market` }, 'Listing gone. Sold?'),
+      button('gone-sold', 'Yes, sold'),
+      button('gone-keep', 'No', { class: 'small secondary' }));
   }
-  if (busy) return '<span class="muted">working…</span>';
+  if (busy) return h('span', { class: 'muted' }, 'working…');
 
   if (!listing) {
-    return `<div class="actions"><span class="muted">—</span>
-      <button class="small" data-action="list"${r.sellAt && r.rankKnown ? '' : ' disabled'} title="${!r.rankKnown ? 'Set the rank first' : state.auth.connected ? `List ${listQtyOf(e)}× at ${r.sellAt ?? '?'}p` : 'Log in on warframe.market to list'}">List</button>
-      ${sold}</div>`;
+    const title = !r.rankKnown ? 'Set the rank first' : state.auth.connected ? `List ${listQtyOf(e)}× at ${r.sellAt ?? '?'}p` : 'Log in on warframe.market to list';
+    return h('div', { class: 'actions' }, dash(), button('list', 'List', { disabled: !(r.sellAt && r.rankKnown), title }), sold);
   }
 
   const above = r.lowestSell !== null && listing.platinum > r.lowestSell;
-  const changed = (r.sellAt && r.sellAt !== listing.platinum) || listing.quantity !== listQtyOf(e);
-  const status = `<span class="${above ? 'bad' : 'good'}" title="${above ? 'Priced above the cheapest online seller' : 'Competitive'}">${listing.platinum}p ×${listing.quantity}${listing.visible === false ? ' (hidden)' : ''}</span>`;
-  const controls = state.auth.connected
-    ? `${changed ? `<button class="small" data-action="update" title="Change listing to ${listQtyOf(e)}× at ${r.sellAt}p">Update</button>` : ''}
-       <button class="small secondary" data-action="unlist">Unlist</button>`
-    : '';
-  return `<div class="actions">${status}${controls}${sold}</div>`;
+  const changed = (!!r.sellAt && r.sellAt !== listing.platinum) || listing.quantity !== listQtyOf(e);
+  return h('div', { class: 'actions' },
+    h('span', { class: above ? 'bad' : 'good', title: above ? 'Priced above the cheapest online seller' : 'Competitive' },
+      `${listing.platinum}p ×${listing.quantity}${listing.visible === false ? ' (hidden)' : ''}`),
+    state.auth.connected && changed && button('update', 'Update', { title: `Change listing to ${listQtyOf(e)}× at ${r.sellAt}p` }),
+    state.auth.connected && button('unlist', 'Unlist', { class: 'small secondary' }),
+    sold);
 }
 
 // Both item tables (not listed / listed) share these columns.
-const TABLE_HEADER = `<tr>
-  <th data-sort="name">Item</th>
-  <th data-sort="qty" class="r" title="How many you own">Qty</th>
-  <th class="r">Rank / Ref.</th>
-  <th data-sort="lowestSell" class="r" title="Cheapest seller who is online right now">Lowest sell</th>
-  <th data-sort="medianSell" class="r" title="Median of the 5 cheapest online sellers">Median</th>
-  <th data-sort="bestBuy" class="r" title="Highest buy order from an online player — instant sale">Best buy</th>
-  <th data-sort="value" class="r" title="Lowest sell × quantity">Value</th>
-  <th data-sort="ducats" class="r">Ducats</th>
-  <th data-sort="dpp" class="r" title="Ducats per platinum: high = better to sell to Baro Ki'Teer">D/P</th>
-  <th data-sort="sellAt" class="r" title="Your listing price. Leave empty to use the default (lowest online minus undercut).">Sell at</th>
-  <th class="r" title="How many to put on the market. Leave empty to list all you own.">List qty</th>
-  <th data-sort="listed">Listing</th>
-  <th></th>
-</tr>`;
+const COLUMNS = [
+  { label: 'Item', sort: 'name' },
+  { label: 'Qty', sort: 'qty', right: true, title: 'How many you own' },
+  { label: 'Rank / Ref.', right: true },
+  { label: 'Lowest sell', sort: 'lowestSell', right: true, title: 'Cheapest seller who is online right now' },
+  { label: 'Median', sort: 'medianSell', right: true, title: 'Median of the 5 cheapest online sellers' },
+  { label: 'Best buy', sort: 'bestBuy', right: true, title: 'Highest buy order from an online player — instant sale' },
+  { label: 'Value', sort: 'value', right: true, title: 'Lowest sell × quantity' },
+  { label: 'Ducats', sort: 'ducats', right: true },
+  { label: 'D/P', sort: 'dpp', right: true, title: "Ducats per platinum: high = better to sell to Baro Ki'Teer" },
+  { label: 'Sell at', sort: 'sellAt', right: true, title: "Your listing price. Leave empty to use the default (lowest online minus undercut)." },
+  { label: 'List qty', right: true, title: 'How many to put on the market. Leave empty to list all you own.' },
+  { label: 'Listing', sort: 'listed' },
+  { label: '' },
+];
 
-const rowHtml = (r) => `
-    <tr data-key="${esc(r.key)}"${r.e.gone ? ' class="gone"' : ''}>
-      <td><div class="item">
-        ${r.item.thumb ? `<img src="${ASSETS + esc(r.item.thumb)}" alt="" loading="lazy">` : '<span class="thumb-missing"></span>'}
-        <a href="https://warframe.market/items/${esc(r.e.slug)}" target="_blank" rel="noopener" title="${esc(r.name)}">${esc(r.name)}</a>
-        ${r.item.vaulted ? '<span class="tag">vaulted</span>' : ''}
-      </div></td>
-      <td class="r"><input class="num" type="number" min="1" value="${r.qty}" data-field="qty"></td>
-      <td class="r">${rankCell(r)}</td>
-      <td class="r">${priceCell(r, 'lowestSell')}</td>
-      <td class="r">${priceCell(r, 'medianSell')}</td>
-      <td class="r">${priceCell(r, 'bestBuy')}</td>
-      <td class="r">${r.value === null ? fmt(null) : `<b class="plat">${r.value}</b>`}</td>
-      <td class="r">${fmt(r.ducats)}</td>
-      <td class="r">${r.dpp === null ? fmt(null) : r.dpp.toFixed(1)}</td>
-      <td class="r"><input class="num price-input${r.e.price ? ' custom' : ''}${r.rankKnown && underpriced(r) ? ' too-low' : ''}" type="number" min="1" data-field="price"
-        value="${r.e.price ?? ''}" placeholder="${defaultPrice(r.lowestSell) ?? ''}" title="${r.rankKnown && underpriced(r) ? esc(underpricedText(r)) : 'Empty = lowest online − undercut'}"></td>
-      <td class="r"><input class="num${r.e.listQty ? ' custom' : ''}" type="number" min="1" max="${r.qty}" data-field="listQty"
-        value="${r.e.listQty ?? ''}" placeholder="${r.qty}" title="Empty = all ${r.qty}"></td>
-      <td>${listingCell(r)}</td>
-      <td><button class="icon" data-action="remove" title="Remove from list">✕</button></td>
-    </tr>`;
+const tableHeader = () => h('tr', null, COLUMNS.map((c) => h('th', { 'data-sort': c.sort, class: c.right ? 'r' : null, title: c.title }, c.label)));
+
+function rowEl(r) {
+  const { e, item } = r;
+  const tooLow = r.rankKnown && underpriced(r);
+  const cell = (child) => h('td', { class: 'r' }, child);
+  return h('tr', { 'data-key': r.key, class: e.gone ? 'gone' : null },
+    h('td', null, h('div', { class: 'item' },
+      item.thumb ? h('img', { src: ASSETS + item.thumb, alt: '', loading: 'lazy' }) : h('span', { class: 'thumb-missing' }),
+      h('a', { href: `https://warframe.market/items/${encodeURIComponent(e.slug)}`, target: '_blank', rel: 'noopener', title: r.name }, r.name),
+      item.vaulted && h('span', { class: 'tag' }, 'vaulted'))),
+    cell(h('input', { class: 'num', type: 'number', min: 1, value: r.qty, 'data-field': 'qty' })),
+    cell(rankCell(r)),
+    cell(priceCell(r, 'lowestSell')),
+    cell(priceCell(r, 'medianSell')),
+    cell(priceCell(r, 'bestBuy')),
+    cell(r.value === null ? dash() : plat(r.value, 'b')),
+    cell(fmt(r.ducats)),
+    cell(r.dpp === null ? dash() : r.dpp.toFixed(1)),
+    cell(h('input', { class: `num price-input${e.price ? ' custom' : ''}${tooLow ? ' too-low' : ''}`, type: 'number', min: 1, 'data-field': 'price',
+      value: e.price ?? '', placeholder: defaultPrice(r.lowestSell) ?? '', title: tooLow ? underpricedText(r) : 'Empty = lowest online − undercut' })),
+    cell(h('input', { class: `num${e.listQty ? ' custom' : ''}`, type: 'number', min: 1, max: r.qty, 'data-field': 'listQty',
+      value: e.listQty ?? '', placeholder: r.qty, title: `Empty = all ${r.qty}` })),
+    h('td', null, listingCell(r)),
+    h('td', null, h('button', { class: 'icon', 'data-action': 'remove', title: 'Remove from list' }, '✕')));
+}
 
 // Each table is split into foldable groups by item type; empty groups are left out.
 const GROUPS = [
@@ -620,20 +629,18 @@ const foldedGroups = new Set(JSON.parse(storageGet('foldedGroups', '[]')));
 
 function renderGroups(table, rows) {
   table.querySelectorAll('tbody').forEach((b) => b.remove());
-  const html = GROUPS.map((g) => {
+  for (const g of GROUPS) {
     const groupRows = rows.filter((r) => g.categories.includes(r.category));
-    if (!groupRows.length) return '';
+    if (!groupRows.length) continue;
     const id = `${table.id}:${g.key}`;
     const value = groupRows.reduce((s, r) => s + (r.value ?? 0), 0);
-    return `<tbody class="group${foldedGroups.has(id) ? ' folded' : ''}" data-group="${id}">
-      <tr class="group-head" data-action="toggle-group"><td colspan="13">
-        <span class="arrow"></span><b>${g.label}</b>
-        <span class="count">${groupRows.length} item${groupRows.length === 1 ? '' : 's'} · ${value.toLocaleString()}p</span>
-      </td></tr>
-      ${groupRows.map(rowHtml).join('')}
-    </tbody>`;
-  }).join('');
-  table.insertAdjacentHTML('beforeend', html);
+    table.append(h('tbody', { class: `group${foldedGroups.has(id) ? ' folded' : ''}`, 'data-group': id },
+      h('tr', { class: 'group-head', 'data-action': 'toggle-group' }, h('td', { colspan: COLUMNS.length },
+        h('span', { class: 'arrow' }),
+        h('b', null, g.label),
+        h('span', { class: 'count' }, `${groupRows.length} item${groupRows.length === 1 ? '' : 's'} · ${value.toLocaleString()}p`))),
+      groupRows.map(rowEl)));
+  }
 }
 
 function render() {
@@ -660,13 +667,14 @@ function render() {
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
   const listable = unlisted.filter((r) => r.sellAt && r.rankKnown && !underpriced(r)).length;
   const rankNeeded = unlisted.filter((r) => !r.rankKnown).length;
-  $('#summary').innerHTML = `
-    <span>Rows <b>${rows.length}</b></span>
-    <span>Items <b>${totalQty}</b></span>
-    <span>Market value <b class="plat">${totalPlat.toLocaleString()}p</b></span>
-    <span>Ducats <b>${totalDucats.toLocaleString()}</b></span>
-    <span>Not listed yet <b>${unlisted.length}</b></span>${rankNeeded ? `
-    <span class="bad" title="Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing">Rank needed <b>${rankNeeded}</b></span>` : ''}`;
+  const stat = (label, value, attrs) => h('span', attrs, `${label} `, value instanceof Node ? value : h('b', null, value));
+  fill($('#summary'),
+    stat('Rows', rows.length),
+    stat('Items', totalQty),
+    stat('Market value', plat(`${totalPlat.toLocaleString()}p`, 'b')),
+    stat('Ducats', totalDucats.toLocaleString()),
+    stat('Not listed yet', unlisted.length),
+    rankNeeded > 0 && stat('Rank needed', rankNeeded, { class: 'bad', title: "Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing" }));
   $('#listAllBtn').textContent = listable ? `List all unlisted (${listable})` : 'List all unlisted';
 
   const gone = state.inventory.filter((e) => e.gone).length;
@@ -722,25 +730,22 @@ async function computeSets() {
   }
 
   $('#setsCard').hidden = complete.length === 0;
-  $('#setsTable tbody').innerHTML = complete.map((s) => {
+  fill($('#setsTable tbody'), complete.map((s) => {
     const setPrice = state.prices.get(rowKey({ slug: s.setSlug, rank: null, subtype: null }))?.lowestSell ?? null;
     const partPrices = s.parts.map((p) => (state.prices.get(rowKey({ slug: p.slug, rank: null, subtype: null }))?.lowestSell ?? null));
     const partsTotal = partPrices.includes(null) ? null : s.parts.reduce((sum, p, i) => sum + partPrices[i] * p.quantityInSet, 0);
-    let better = '<span class="muted">—</span>';
+    let better = dash();
     if (setPrice !== null && partsTotal !== null) {
-      better = setPrice >= partsTotal
-        ? `<span class="good">Set (+${setPrice - partsTotal}p)</span>`
-        : `<span class="good">Parts (+${partsTotal - setPrice}p)</span>`;
+      better = h('span', { class: 'good' }, setPrice >= partsTotal ? `Set (+${setPrice - partsTotal}p)` : `Parts (+${partsTotal - setPrice}p)`);
     }
     const item = state.bySlug.get(s.setSlug);
-    return `<tr>
-      <td><a href="https://warframe.market/items/${esc(s.setSlug)}" target="_blank" rel="noopener">${esc(item ? item.name : s.setSlug)}</a></td>
-      <td class="r">${s.count}</td>
-      <td class="r">${setPrice === null ? fmt(null) : `<span class="plat">${setPrice}</span>`}</td>
-      <td class="r">${partsTotal === null ? fmt(null) : `<span class="plat">${partsTotal}</span>`}</td>
-      <td class="r">${better}</td>
-    </tr>`;
-  }).join('');
+    return h('tr', null,
+      h('td', null, h('a', { href: `https://warframe.market/items/${encodeURIComponent(s.setSlug)}`, target: '_blank', rel: 'noopener' }, item ? item.name : s.setSlug)),
+      h('td', { class: 'r' }, s.count),
+      h('td', { class: 'r' }, setPrice === null ? dash() : plat(setPrice)),
+      h('td', { class: 'r' }, partsTotal === null ? dash() : plat(partsTotal)),
+      h('td', { class: 'r' }, better));
+  }));
 }
 
 // ---------- backup ----------
@@ -811,7 +816,7 @@ function wireEvents() {
 
   // Two foldable item tables with the same columns; remember which ones you folded.
   for (const section of document.querySelectorAll('.item-section')) {
-    section.querySelector('thead').innerHTML = TABLE_HEADER;
+    fill(section.querySelector('thead'), tableHeader());
     section.open = storageGet(`fold:${section.id}`, 'open') === 'open';
     section.addEventListener('toggle', () => storageSet(`fold:${section.id}`, section.open ? 'open' : 'closed'));
   }
@@ -941,12 +946,10 @@ async function init() {
       state.byId.set(it.id, it);
       state.byName.set(it.name.toLowerCase(), it);
     }
-    $('#itemNames').innerHTML = state.items
+    fill($('#itemNames'), state.items
       .filter((i) => !i.tags.includes('set') || i.tags.includes('prime'))
-      .map((i) => `<option value="${esc(i.name)}">`).join('');
-    for (const c of ['Prime Part', 'Prime Set', 'Mod', 'Arcane', 'Relic', 'Other']) {
-      $('#fCategory').insertAdjacentHTML('beforeend', `<option>${c}</option>`);
-    }
+      .map((i) => h('option', { value: i.name })));
+    $('#fCategory').append(...['Prime Part', 'Prime Set', 'Mod', 'Arcane', 'Relic', 'Other'].map((c) => h('option', null, c)));
 
     await reloadInventory();
     await loadCachedPrices();

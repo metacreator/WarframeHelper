@@ -11,7 +11,8 @@ const path = require('path');
 
 const REAL_API = 'https://api.warframe.market';
 const TOKEN = 'mock-token-123';
-const FIXTURES = ['shotA.png', 'shotB.png', 'real1.png', 'real2.png'];
+const LANGS = ['en', 'uk', 'es', 'zh-hans', 'zh-hant'];
+const FIXTURES = ['shotA.png', 'shotB.png', 'real1.png', 'real2.png', 'language-shots.json', ...LANGS.map((l) => `lang-${l}.png`)];
 
 function startMock({ port = 3901, fixturesDir, outputDir, onReport = () => {} }) {
   const orders = new Map();
@@ -41,7 +42,7 @@ function startMock({ port = 3901, fixturesDir, outputDir, onReport = () => {} })
       return send(200, {});
     }
     if (FIXTURES.includes(url.pathname.slice(1))) {
-      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.writeHead(200, { 'Content-Type': url.pathname.endsWith('.json') ? 'application/json' : 'image/png' });
       return res.end(fs.readFileSync(path.join(fixturesDir, url.pathname.slice(1))));
     }
 
@@ -89,7 +90,7 @@ function startMock({ port = 3901, fixturesDir, outputDir, onReport = () => {} })
     }
 
     // --- everything else: real public data ---
-    const r = await fetch(REAL_API + req.url, { headers: { Platform: 'pc', Language: 'en' } });
+    const r = await fetch(REAL_API + req.url, { headers: { Platform: 'pc', Language: req.headers.language || 'en' } });
     res.writeHead(r.status, { 'Content-Type': 'application/json' });
     res.end(Buffer.from(await r.arrayBuffer()));
   });

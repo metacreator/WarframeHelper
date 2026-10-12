@@ -141,6 +141,7 @@ input[type=range] { vertical-align: middle; padding: 0; }
 @media (max-width: 1100px) { .scan-grid { grid-template-columns: minmax(0, 1fr); } }
 .scan-table-wrap { max-height: 520px; overflow: auto; }
 .scan-item { width: 100%; min-width: 220px; padding: 3px 6px; }
+.scan-item-wrap { display: flex; gap: 4px; }
 td.ocr { max-width: 180px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 #scanPreview { width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--border); margin-top: 8px; }
 #scanPreview { cursor: zoom-in; }

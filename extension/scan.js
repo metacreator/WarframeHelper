@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Tesseract, state, category, findItem, addEntries, setStatus, esc, $ */
+/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet */
 // Screenshot scanner: reads Warframe inventory screenshots with Tesseract.js (OCR, runs in the browser),
 // matches the text on each tile to a warframe.market item, and merges overlapping screenshots.
 //
@@ -18,14 +18,39 @@ const COUNT_PARAMS = { tessedit_pageseg_mode: '6', tessedit_char_whitelist: '012
 // One name area re-read as a block: far more accurate than the whole-screen pass, which tends to drop letters.
 const TILE_PARAMS = { tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' };
 
+// Languages the game can be in. ocr: Tesseract language data in vendor/tesseract/lang. Item names in that
+// language come from warframe.market, which uses the game's own translations.
+const GAME_LANGS = {
+  en: { label: 'English', ocr: 'eng' },
+  uk: { label: 'Українська', ocr: 'ukr' },
+  es: { label: 'Español', ocr: 'spa' },
+  'zh-hans': { label: '简体中文', ocr: 'chi_sim' },
+  'zh-hant': { label: '繁體中文', ocr: 'chi_tra' },
+};
+
+// Relic refinement words in every supported language. A refined relic is its own tile, and its refinement
+// is read when it's printed with the name. Without it the relic is taken as Intact (warframe.market's default).
+const REFINEMENTS = {
+  intact: ['intact', 'intacta', 'intacto', 'ціла', 'цілісна', 'неушкоджена', '完整'],
+  exceptional: ['exceptional', 'excepcional', 'виняткова', '优良', '優良'],
+  flawless: ['flawless', 'impecable', 'бездоганна', '无暇', '無瑕'],
+  radiant: ['radiant', 'radiante', 'сяйна', 'сяюча', 'променева', '光辉', '光輝'],
+};
+
+// Two screenshots are read at the same time on computers with enough cores.
+const POOL_SIZE = Math.max(1, Math.min(2, Math.floor((navigator.hardwareConcurrency || 2) / 2)));
+
 const scan = {
-  shots: [],         // { id, name, img, status, progress, detections, counts, processed }
+  shots: [],         // { id, name, img, status, progress, detections, processed, seconds, timings }
   nextId: 1,
-  worker: null,
-  queue: Promise.resolve(),
-  current: null,     // shot being recognised (for progress)
+  pending: [],       // shots waiting for a free worker
+  workers: [],       // per slot: { ocr, promise }
+  busy: [],          // per slot: shot being read (for progress)
+  lang: 'en',
+  names: null,       // { slug: name } in the game language; null = English
+  namesPromise: null,
   previewId: null,
-  edits: new Map(),  // row key -> { slug?, qty?, checked? } user corrections, survive re-aggregation
+  edits: new Map(),  // row key -> { slug?, qty?, subtype?, checked? } user corrections, survive re-aggregation
   rows: [],
 };
 
@@ -41,24 +66,73 @@ function loadScript(src) {
   });
 }
 
-async function getWorker() {
-  if (scan.worker) return scan.worker;
-  if (!window.Tesseract) await loadScript(TESSERACT_URL);
+let tesseractLoaded = null;
+
+async function createWorker(ocr, logger) {
+  tesseractLoaded ??= window.Tesseract ? Promise.resolve() : loadScript(TESSERACT_URL);
+  await tesseractLoaded;
   const url = (p) => browser.runtime.getURL(`${TESSERACT_DIR}/${p}`);
-  const worker = await Tesseract.createWorker('eng', 1, {
+  return Tesseract.createWorker(ocr, 1, {
     workerPath: url('worker.min.js'),
     corePath: url('core'),
     langPath: url('lang'),
     workerBlobURL: false, // blob: workers are blocked on extension pages
-    logger: (m) => {
-      if (scan.current && m.status === 'recognizing text') {
-        scan.current.progress = m.progress;
-        renderShots();
-      }
-    },
+    ...(logger ? { logger } : {}),
   });
-  scan.worker = worker;
-  return worker;
+}
+
+// Stack counts are digits in every language, and the English model reads them best (the Ukrainian one takes
+// a 3 for a З). One worker serves both slots: its settings never change, and its jobs are short.
+let countWorker = null;
+function getCountWorker() {
+  countWorker ??= createWorker('eng').then(async (w) => { await w.setParameters(COUNT_PARAMS); return w; });
+  countWorker.catch(() => { countWorker = null; });
+  return countWorker;
+}
+
+// Each slot has its own worker, created for the current game language (and replaced when it changes).
+async function getWorker(slot) {
+  const ocr = GAME_LANGS[scan.lang].ocr;
+  const current = scan.workers[slot];
+  if (current?.ocr === ocr) return current.promise;
+  if (current) current.promise.then((w) => w.terminate()).catch(() => {});
+  const promise = createWorker(ocr, (m) => {
+    const shot = scan.busy[slot];
+    if (shot && m.status === 'recognizing text') {
+      shot.progress = m.progress;
+      renderShotsSoon();
+    }
+  });
+  scan.workers[slot] = { ocr, promise };
+  promise.catch(() => { if (scan.workers[slot]?.promise === promise) scan.workers[slot] = null; });
+  return promise;
+}
+
+function setLanguage(lang) {
+  scan.lang = GAME_LANGS[lang] ? lang : 'en';
+  scan.names = null;
+  scan.namesPromise = null;
+}
+
+async function ensureNames() {
+  if (scan.lang === 'en') { scan.names = null; return; }
+  scan.namesPromise ??= Backend.getItemNames(scan.lang);
+  try {
+    scan.names = await scan.namesPromise;
+  } catch (err) {
+    scan.namesPromise = null; // try again with the next screenshot
+    throw new Error(`Could not load ${GAME_LANGS[scan.lang].label} item names: ${err.message}`);
+  }
+}
+
+// The browser's language is the best first guess for the game's.
+function guessLanguage() {
+  const l = (navigator.language || 'en').toLowerCase();
+  if (l.startsWith('uk')) return 'uk';
+  if (l.startsWith('es')) return 'es';
+  if (/^zh-(tw|hk|mo|hant)/.test(l)) return 'zh-hant';
+  if (l.startsWith('zh')) return 'zh-hans';
+  return 'en';
 }
 
 // ---------- image prep ----------
@@ -122,9 +196,9 @@ function estimateTextColor(img, detections) {
   const rs = [], gs = [], bs = [];
   for (const d of sure) {
     const x0 = Math.max(0, Math.floor(d.x0)), y0 = Math.max(0, Math.floor(d.y0));
-    const w = Math.min(c.width - x0, Math.ceil(d.x1 - d.x0)), h = Math.min(c.height - y0, Math.ceil(d.y1 - d.y0));
-    if (w < 2 || h < 2) continue;
-    const px = ctx.getImageData(x0, y0, w, h).data;
+    const w = Math.min(c.width - x0, Math.ceil(d.x1 - d.x0)), ht = Math.min(c.height - y0, Math.ceil(d.y1 - d.y0));
+    if (w < 2 || ht < 2) continue;
+    const px = ctx.getImageData(x0, y0, w, ht).data;
     const lums = [];
     for (let i = 0; i < px.length; i += 4) lums.push(luminance(px[i], px[i + 1], px[i + 2]));
     const cut = Math.max(90, [...lums].sort((a, b) => a - b)[Math.floor(lums.length * 0.66)]);
@@ -142,6 +216,30 @@ function wordsFrom(data) {
   for (const b of data.blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) out.push(...(l.words ?? []));
   return out;
 }
+
+// ---------- text helpers (any script) ----------
+
+const HAN = /\p{Script=Han}/u;
+
+// How much readable text a string holds. A Chinese character carries about as much as three letters.
+function textWeight(s, withDigits = false) {
+  let n = 0;
+  for (const c of s) {
+    if (HAN.test(c)) n += 3;
+    else if (/\p{L}/u.test(c) || (withDigits && /\p{N}/u.test(c))) n += 1;
+  }
+  return n;
+}
+
+// Cyrillic letters that look like Latin ones: OCR mixes them up (the "A1" in "Реліквія Літ A1" is Latin).
+const LOOKALIKE = { а: 'a', в: 'b', е: 'e', і: 'i', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x' };
+
+// Comparable form of a name: lower case, no accents or punctuation, lookalike letters unified, and no spaces
+// next to Chinese characters (OCR puts spaces between them that the real name doesn't have).
+const norm = (s) => s.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')
+  .replace(/[авеікмнорстух]/g, (c) => LOOKALIKE[c])
+  .replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  .replace(/\s+(?=\p{Script=Han})|(?<=\p{Script=Han})\s+/gu, '');
 
 // ---------- layout analysis ----------
 
@@ -168,19 +266,21 @@ function analyze(rawWords, scale) {
       conf: w.confidence,
       x0: w.bbox.x0 / scale, y0: w.bbox.y0 / scale, x1: w.bbox.x1 / scale, y1: w.bbox.y1 / scale,
     }))
-    .filter((w) => w.text && /[a-z0-9]/i.test(w.text) && w.conf >= 25)
+    .filter((w) => w.text && /[\p{L}\p{N}]/u.test(w.text) && w.conf >= 25)
     .map((w) => ({ ...w, h: w.y1 - w.y0, cx: (w.x0 + w.x1) / 2, cy: (w.y0 + w.y1) / 2 }));
 
   const counts = words.filter((w) => COUNT_RE.test(w.text));
-  // Short tokens like "A1" (relic names) are kept only when read confidently, to avoid art noise.
-  const nameWords = words.filter((w) => !COUNT_RE.test(w.text) && /[a-z]/i.test(w.text) && (/[a-z]{2,}/i.test(w.text) || w.conf >= 60));
-  const h = median(nameWords.map((w) => w.h)) || 12;
+  // Short tokens like "A1" (relic names) are kept only when read confidently, to avoid art noise; the same
+  // goes for single Chinese characters, which item art is often mistaken for.
+  const nameWords = words.filter((w) => !COUNT_RE.test(w.text) && /\p{L}/u.test(w.text)
+    && (HAN.test(w.text) ? w.conf >= 30 : /\p{L}{2,}/u.test(w.text) || w.conf >= 60));
+  const textH = median(nameWords.map((w) => w.h)) || 12;
 
   // 1. Rows of words sharing a baseline, split into segments at large horizontal gaps (separate tiles).
   const sorted = [...nameWords].sort((a, b) => a.cy - b.cy);
   const rows = [];
   for (const w of sorted) {
-    const row = rows.find((r) => Math.abs(r.cy - w.cy) < h * 0.6);
+    const row = rows.find((r) => Math.abs(r.cy - w.cy) < textH * 0.6);
     if (row) { row.words.push(w); row.cy = (row.cy * (row.words.length - 1) + w.cy) / row.words.length; }
     else rows.push({ cy: w.cy, words: [w] });
   }
@@ -189,7 +289,7 @@ function analyze(rawWords, scale) {
     r.words.sort((a, b) => a.x0 - b.x0);
     let seg = [r.words[0]];
     for (let i = 1; i < r.words.length; i++) {
-      if (r.words[i].x0 - r.words[i - 1].x1 > h * 1.5) { segments.push(seg); seg = []; }
+      if (r.words[i].x0 - r.words[i - 1].x1 > textH * 1.5) { segments.push(seg); seg = []; }
       seg.push(r.words[i]);
     }
     segments.push(seg);
@@ -205,7 +305,7 @@ function analyze(rawWords, scale) {
       const gap = s.y0 - last.y1;
       const lcx = (last.x0 + last.x1) / 2;
       const width = Math.max(last.x1 - last.x0, s.x1 - s.x0);
-      return gap > -h * 0.3 && gap < h * 0.9 && Math.abs(cx - lcx) < width * 0.35;
+      return gap > -textH * 0.3 && gap < textH * 0.9 && Math.abs(cx - lcx) < width * 0.35;
     });
     if (target) target.segs.push(s);
     else clusters.push({ segs: [s] });
@@ -219,60 +319,117 @@ function analyze(rawWords, scale) {
   });
   for (const n of counts) {
     if (n.conf < 80) continue;
-    const d = detections.find((x) => n.cy > x.y0 && n.cy < x.y1 && n.x0 >= x.x1 - h && n.x0 - x.x1 < h * 2);
+    const d = detections.find((x) => n.cy > x.y0 && n.cy < x.y1 && n.x0 >= x.x1 - textH && n.x0 - x.x1 < textH * 2);
     const qty = Number(n.text.replace(/[^0-9]/g, ''));
     if (d && qty > 1) { d.qty = qty; d.countBox = n; d.countText = n.text; }
   }
-  return { detections, counts, h };
+  return { detections, counts, textH };
+}
+
+// Groups nearby values (tile centres along one axis) and returns the centre of each group, in order.
+function groupValues(values, gap) {
+  const groups = [];
+  for (const v of [...values].sort((a, b) => a - b)) {
+    const last = groups[groups.length - 1];
+    if (last && v - last[last.length - 1] <= gap) last.push(v);
+    else groups.push([v]);
+  }
+  return groups.map(median);
+}
+
+const nearestIndex = (centres, v) => centres.reduce((best, c, i) => (Math.abs(c - v) < Math.abs(centres[best] - v) ? i : best), 0);
+
+// The first pass alone is enough when every name it found is a confident match and those names fill a grid
+// with no gaps (a gap is a tile whose name wasn't read). Otherwise the colour pass looks for what's missing.
+function looksComplete(detections, textH) {
+  const named = detections.filter((d) => d.match && !d.match.ambiguous && d.match.score >= 0.9);
+  if (named.length < 4) return false;
+  const area = {
+    x0: Math.min(...named.map((d) => d.x0)) - textH, x1: Math.max(...named.map((d) => d.x1)) + textH,
+    y0: Math.min(...named.map((d) => d.y0)) - textH, y1: Math.max(...named.map((d) => d.y1)) + textH,
+  };
+  const inGrid = (d) => { const cx = (d.x0 + d.x1) / 2, cy = (d.y0 + d.y1) / 2; return cx > area.x0 && cx < area.x1 && cy > area.y0 && cy < area.y1; };
+  // Text among the tiles that isn't a clear item name is a name the first pass couldn't read properly.
+  if (detections.some((d) => !named.includes(d) && textWeight(d.segs.join('')) >= 5 && inGrid(d))) return false;
+
+  const cx = (d) => (d.x0 + d.x1) / 2;
+  const cols = groupValues(named.map(cx), textH * 3);
+  const rows = groupValues(named.map((d) => d.y1), textH * 3);
+  const cells = new Set(named.map((d) => `${nearestIndex(rows, d.y1)}:${nearestIndex(cols, cx(d))}`));
+  for (let r = 0; r < rows.length; r++) {
+    for (let c = 0; c < cols.length; c++) {
+      if (cells.has(`${r}:${c}`)) continue;
+      // Only the last row may end early (the end of the inventory).
+      const laterInRow = cols.some((_, k) => k > c && cells.has(`${r}:${k}`));
+      if (r < rows.length - 1 || laterInRow) return false;
+    }
+  }
+  return true;
+}
+
+// Tesseract.js re-encodes the whole image on every call, even to read a small area, so small areas are cut
+// out first (with a white margin, as text touching the edge reads worse). Word boxes come back in screenshot
+// coordinates. r is in screenshot pixels; the canvas is the upscaled, black-on-white one.
+const CROP_MARGIN = 8;
+async function recognizeArea(worker, canvas, scale, r, output) {
+  const w = Math.max(1, Math.round((r.x1 - r.x0) * scale)), ht = Math.max(1, Math.round((r.y1 - r.y0) * scale));
+  const c = document.createElement('canvas');
+  c.width = w + 2 * CROP_MARGIN;
+  c.height = ht + 2 * CROP_MARGIN;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(canvas, Math.round(r.x0 * scale), Math.round(r.y0 * scale), w, ht, CROP_MARGIN, CROP_MARGIN, w, ht);
+  const { data } = await worker.recognize(c, {}, output);
+  const toShot = (b) => ({ x0: r.x0 + (b.x0 - CROP_MARGIN) / scale, y0: r.y0 + (b.y0 - CROP_MARGIN) / scale, x1: r.x0 + (b.x1 - CROP_MARGIN) / scale, y1: r.y0 + (b.y1 - CROP_MARGIN) / scale });
+  return { text: data.text, words: output?.blocks ? wordsFrom(data).map((wd) => ({ text: wd.text, confidence: wd.confidence, box: toShot(wd.bbox) })) : [] };
 }
 
 // Tesseract skips lone digits when reading a whole screen, so tile counts get a digits-only pass over the
 // upper part of each tile (where stack counts sit). Tile size is estimated from the spacing between names.
 // Only a clear, confident number counts; anything else means the tile holds a single item.
-async function readCounts(worker, canvas, scale, detections, h) {
-  const targets = detections.filter((d) => d.segs.join('').replace(/[^a-z]/gi, '').length >= 4);
+async function readCounts(canvas, scale, detections, textH) {
+  const targets = detections.filter((d) => textWeight(d.segs.join('')) >= 4);
   if (!targets.length) return;
-  const cx = (d) => (d.x0 + d.x1) / 2;
-  const rows = [];
-  for (const d of [...targets].sort((a, b) => a.y1 - b.y1)) {
-    const row = rows.find((r) => Math.abs(r.y - d.y1) < h * 1.5);
-    if (row) row.items.push(d);
-    else rows.push({ y: d.y1, items: [d] });
-  }
-  const gaps = (arr) => arr.sort((a, b) => a - b).map((v, i, a) => v - a[i - 1]).slice(1).filter((g) => g > h * 2);
-  const xGaps = rows.flatMap((r) => gaps(r.items.map(cx)));
-  const yGaps = gaps(rows.map((r) => r.y));
+  const cx = (d) => (d.x0 + d.x1) / 2, cy = (d) => (d.y0 + d.y1) / 2;
+  // Rows of tiles: names in one row may have one to three lines, so they're grouped by centre, generously.
+  const rowCentres = groupValues(targets.map(cy), textH * 3);
+  const rows = rowCentres.map(() => []);
+  for (const d of targets) rows[nearestIndex(rowCentres, cy(d))].push(d);
+  const gaps = (arr) => [...arr].sort((a, b) => a - b).map((v, i, a) => v - a[i - 1]).slice(1).filter((g) => g > textH * 2);
+  const xGaps = rows.flatMap((r) => gaps(r.map(cx)));
+  const yGaps = gaps(rowCentres);
   const W = xGaps.length ? median(xGaps) : Math.max(...targets.map((d) => d.x1 - d.x0)) * 1.3;
   const H = yGaps.length ? median(yGaps) : W * 1.2;
   const imgW = canvas.width / scale;
 
-  await worker.setParameters(COUNT_PARAMS);
-  for (const d of targets) {
-    if (d.countBox) continue; // already found next to the name
-    const left = Math.max(0, cx(d) - W / 2), right = Math.min(imgW, cx(d) + W / 2);
-    const tileTop = Math.max(0, d.y1 - H + h);
-    const top = tileTop, bottom = Math.min(d.y0 - h * 0.2, tileTop + (d.y0 - tileTop) * 0.4);
-    if (bottom - top < h || right - left < h) continue;
-    const rectangle = { left: left * scale, top: top * scale, width: (right - left) * scale, height: (bottom - top) * scale };
-    const { data } = await worker.recognize(canvas, { rectangle }, { blocks: true });
-    const nums = wordsFrom(data)
-      .filter((w) => w.confidence >= 80 && COUNT_RE.test(w.text.trim()))
-      .filter((w) => { const wh = (w.bbox.y1 - w.bbox.y0) / scale; return wh >= h * 0.6 && wh <= h * 1.8; })
-      .sort((a, b) => a.bbox.y0 - b.bbox.y0);
-    if (!nums.length) continue;
-    const qty = Number(nums[0].text.replace(/[^0-9]/g, ''));
-    if (qty > 1) {
-      const b = nums[0].bbox;
-      d.qty = qty;
-      d.countText = `${nums[0].text} (${Math.round(nums[0].confidence)}%)`;
-      d.countBox = { x0: b.x0 / scale, y0: b.y0 / scale, x1: b.x1 / scale, y1: b.y1 / scale };
+  const worker = await getCountWorker();
+  for (const row of rows) {
+    // Every tile in a row ends at the same height, just under its lowest name line.
+    const rowBottom = Math.max(...row.map((d) => d.y1));
+    for (const d of row) {
+      if (d.countBox) continue; // already found next to the name
+      const left = Math.max(0, cx(d) - W / 2), right = Math.min(imgW, cx(d) + W / 2);
+      const tileTop = Math.max(0, rowBottom - H + textH);
+      const top = tileTop, bottom = Math.min(d.y0 - textH * 0.2, tileTop + (d.y0 - tileTop) * 0.4);
+      if (bottom - top < textH || right - left < textH) continue;
+      const { words } = await recognizeArea(worker, canvas, scale, { x0: left, y0: top, x1: right, y1: bottom }, { blocks: true });
+      const nums = words
+        .filter((w) => w.confidence >= 80 && COUNT_RE.test(w.text.trim()))
+        .filter((w) => { const wh = w.box.y1 - w.box.y0; return wh >= textH * 0.6 && wh <= textH * 1.8; })
+        .sort((a, b) => a.box.y0 - b.box.y0);
+      if (!nums.length) continue;
+      const qty = Number(nums[0].text.replace(/[^0-9]/g, ''));
+      if (qty > 1) {
+        d.qty = qty;
+        d.countText = `${nums[0].text} (${Math.round(nums[0].confidence)}%)`;
+        d.countBox = nums[0].box;
+      }
     }
   }
 }
 
 // ---------- matching text to items ----------
-
-const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 function levenshtein(a, b) {
   if (a === b) return 0;
@@ -291,22 +448,23 @@ function levenshtein(a, b) {
 let indexCache = { key: null, list: [] };
 function matchIndex() {
   const cat = $('#scanCategory').value;
-  if (indexCache.key === cat) return indexCache.list;
+  const key = `${cat}|${scan.lang}|${!!scan.names}`;
+  if (indexCache.key === key) return indexCache.list;
   const list = [];
   for (const item of state.items) {
     if (item.tags.includes('set')) continue; // sets aren't inventory items
     if (cat && category(item) !== cat) continue;
     // The inventory shows the same full names as warframe.market ("... Systems Blueprint"), so no
     // shortened variants: "Epitaph Prime" alone must stay unclear, not become "Epitaph Prime Blueprint".
-    list.push({ norm: norm(item.name), item });
+    list.push({ norm: norm(scan.names?.[item.slug] ?? item.name), item });
   }
-  indexCache = { key: cat, list };
+  indexCache = { key, list };
   return list;
 }
 
 function bestMatch(text) {
   const q = norm(text);
-  if (q.replace(/ /g, '').length < 4) return null;
+  if (textWeight(q, true) < 4) return null;
   let best = null, second = null;
   for (const v of matchIndex()) {
     if (Math.abs(v.norm.length - q.length) > Math.max(4, q.length * 0.4)) continue;
@@ -321,27 +479,70 @@ function bestMatch(text) {
   if (!best || best.score < 0.75) return null; // below this it's screen text like "SELL PRICE", not an item
   // Part of a name that fits several items ("Prime Systems Blueprint" when the first word was lost on the
   // item art) must not be guessed: flag it so the row starts unticked for the player to pick.
-  const containing = new Set();
-  for (const v of matchIndex()) if (v.norm !== q && v.norm.includes(q)) containing.add(v.item);
-  const ambiguous = best.score < 1 && (containing.size >= 2 || best.score - (second?.score ?? 0) < 0.03);
+  // The same goes when the reading without its first or last character does: that character may be all
+  // that's left of the distinctive part ("5 Prime 刀刃" when 翁 or 关刀 was lost, as many names end "Prime 刀刃").
+  const fitsSeveral = (part) => {
+    const containing = new Set();
+    for (const v of matchIndex()) if (v.norm !== q && v.norm.includes(part)) containing.add(v.item);
+    return containing.size >= 2;
+  };
+  const cores = [q.slice(1).trim(), q.slice(0, -1).trim()].filter((c) => textWeight(c, true) >= 4);
+  const ambiguous = best.score < 1 && (fitsSeveral(q) || cores.some(fitsSeveral) || best.score - (second?.score ?? 0) < 0.03);
   return { ...best, margin: best.score - (second?.score ?? 0), ambiguous };
 }
 
-const letterCount = (s) => (s.match(/[a-z]/gi) || []).length;
+let refinementWords = null;
+
+// Finds a refinement word in one line of text: { subtype, rest } (rest = the line without it), or null.
+function findRefinement(line) {
+  refinementWords ??= Object.entries(REFINEMENTS).flatMap(([subtype, words]) => words.map((w) => ({ subtype, word: norm(w) })));
+  const n = norm(line);
+  for (const { subtype, word } of refinementWords) {
+    if (HAN.test(word)) {
+      if (n.includes(word)) return { subtype, rest: n.replace(word, ' ').trim() };
+      // Only its first character read, right after the name (relic names end in 遗物, so nothing else ends so)
+      if (n.length > 2 && n.endsWith(word[0])) return { subtype, rest: n.slice(0, -1) };
+      continue;
+    }
+    const tokens = n.split(' ');
+    const allowed = word.length < 6 ? 0 : word.length < 9 ? 1 : 2; // OCR slips in longer words
+    // Brackets around the word are often read as letters ("[СЯЙНА]" as "ІСЯЙНАЇ"), so it may sit inside a token.
+    const i = tokens.findIndex((t) => t.length >= 4 && (t.includes(word) || levenshtein(t, word) <= allowed));
+    if (i >= 0) { tokens.splice(i, 1); return { subtype, rest: tokens.join(' ') }; }
+  }
+  return null;
+}
+
 const matchQuality = (m) => (m ? m.score - (m.ambiguous ? 0.5 : 0) : -1);
+// A reading wins if it matches better, or equally well but also found the relic's refinement.
+const isBetter = (a, b) => matchQuality(a) > matchQuality(b) || (!!a && !!b && matchQuality(a) === matchQuality(b) && !!a.subtype && !b.subtype);
 
 // A name cluster may have picked up a stray line (a badge, a bit of art read as letters); lines with fewer
 // than 3 letters are ignored, and the first/last line may be dropped, at a cost so a full reading wins.
+// A refinement word ("Radiant") is tried both as part of the name and removed, since some item names
+// contain such words ("Radiant Finish"); it only counts for relics.
 function matchDetection(d) {
-  const lines = d.segs.filter((s) => letterCount(s) >= 3);
-  const tries = [[lines, 0]];
-  if (lines.length > 1) tries.push([lines.slice(1), 0.12], [lines.slice(0, -1), 0.12]);
+  const lines = d.segs.filter((s) => textWeight(s) >= 3);
+  let subtype = null;
+  const stripped = lines.map((l) => {
+    const found = findRefinement(l);
+    if (!found) return l;
+    subtype ??= found.subtype;
+    return found.rest;
+  }).filter((l) => textWeight(l) >= 3);
+  const variants = subtype ? [[lines, null], [stripped, subtype]] : [[lines, null]];
   let best = null;
-  for (const [t, penalty] of tries) {
-    const m = t.length ? bestMatch(t.join(' ')) : null;
-    if (!m) continue;
-    m.score -= penalty;
-    if (matchQuality(m) > matchQuality(best)) best = m;
+  for (const [ls, sub] of variants) {
+    const tries = [[ls, 0]];
+    if (ls.length > 1) tries.push([ls.slice(1), 0.12], [ls.slice(0, -1), 0.12]);
+    for (const [t, penalty] of tries) {
+      const m = t.length ? bestMatch(t.join(' ')) : null;
+      if (!m) continue;
+      if (sub && !m.item.subtypes?.includes(sub)) continue;
+      m.score -= penalty;
+      m.subtype = sub;
+      if (isBetter(m, best)) best = m;
+    }
   }
   d.text = d.segs.join(' ');
   d.norm = norm(d.text);
@@ -350,22 +551,44 @@ function matchDetection(d) {
 
 // Re-reads each name area (taller, to catch a first or last line the screen pass missed) as one block,
 // and keeps that reading when it matches better.
-async function rereadNames(worker, canvas, scale, detections, h) {
+async function rereadNames(worker, canvas, scale, detections, textH) {
   await worker.setParameters(TILE_PARAMS);
   const imgW = canvas.width / scale, imgH = canvas.height / scale;
   for (const d of detections) {
-    if (!d.match && letterCount(d.segs.join('')) < 5) continue; // stray letters, not a name
+    if (!d.match && textWeight(d.segs.join('')) < 5) continue; // stray letters, not a name
     const padX = (d.x1 - d.x0) * 0.15;
-    const r = { x0: Math.max(0, d.x0 - padX), y0: Math.max(0, d.y0 - h * 1.3), x1: Math.min(imgW, d.x1 + padX), y1: Math.min(imgH, d.y1 + h * 1.3) };
-    const rectangle = { left: r.x0 * scale, top: r.y0 * scale, width: (r.x1 - r.x0) * scale, height: (r.y1 - r.y0) * scale };
-    const { data } = await worker.recognize(canvas, { rectangle });
-    const reread = { segs: data.text.split('\n').map((s) => s.trim()).filter(Boolean) };
-    matchDetection(reread);
+    const r = { x0: Math.max(0, d.x0 - padX), y0: Math.max(0, d.y0 - textH * 1.3), x1: Math.min(imgW, d.x1 + padX), y1: Math.min(imgH, d.y1 + textH * 1.3) };
     d.area = r;
-    if (matchQuality(reread.match) > matchQuality(d.match)) {
+    // An exact, clear match can't be improved on, so it isn't read again (relics are, for a refinement line).
+    if (matchQuality(d.match) >= 1 && !d.match.item.subtypes) continue;
+    const { text } = await recognizeArea(worker, canvas, scale, r);
+    const reread = { segs: text.split('\n').map((s) => s.trim()).filter(Boolean) };
+    matchDetection(reread);
+    if (isBetter(reread.match, d.match)) {
       Object.assign(d, { segs: reread.segs, text: reread.text, norm: reread.norm, match: reread.match });
     }
   }
+  // A name whose middle wasn't read falls apart into two pieces side by side. Two unclear pieces on one line
+  // are read again together, and replaced by that reading only if it's a clear match.
+  const weak = (d) => (!d.match || d.match.ambiguous) && textWeight(d.segs.join('')) >= 3;
+  for (const a of [...detections]) {
+    for (const b of [...detections]) {
+      if (a === b || a.joined || b.joined || !weak(a) || !weak(b)) continue;
+      const gap = b.x0 - a.x1;
+      if (gap <= 0 || gap > textH * 4 || Math.abs((a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2) > textH) continue;
+      const u = box([a, b]);
+      const r = { x0: Math.max(0, u.x0 - textH), y0: Math.max(0, u.y0 - textH * 1.3), x1: Math.min(imgW, u.x1 + textH), y1: Math.min(imgH, u.y1 + textH * 1.3) };
+      const { text } = await recognizeArea(worker, canvas, scale, r);
+      const joined = { ...u, segs: text.split('\n').map((s) => s.trim()).filter(Boolean), qty: 1, countBox: null, area: r };
+      matchDetection(joined);
+      if (joined.match && !joined.match.ambiguous && joined.match.score >= 0.8) {
+        a.joined = b.joined = true;
+        detections.push(joined);
+      }
+    }
+  }
+  detections = detections.filter((d) => !d.joined);
+
   // Pieces of one name found separately ("Prime" and "Handle") now read the same tile: keep one.
   const kept = [];
   for (const d of detections) {
@@ -376,9 +599,9 @@ async function rereadNames(worker, canvas, scale, detections, h) {
 }
 
 function boxesOverlap(a, b) {
-  const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), h = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
-  if (w <= 0 || h <= 0) return false;
-  return w * h > 0.3 * Math.min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
+  const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), ht = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+  if (w <= 0 || ht <= 0) return false;
+  return w * ht > 0.3 * Math.min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
 }
 
 // ---------- scanning ----------
@@ -396,48 +619,73 @@ function addShots(files) {
 
 function enqueue(shot) {
   shot.status = 'queued';
-  scan.queue = scan.queue.then(() => scanShot(shot)).catch(() => {});
+  if (!scan.pending.includes(shot)) scan.pending.push(shot);
+  for (let slot = 0; slot < POOL_SIZE; slot++) {
+    if (!scan.busy[slot] && scan.pending.length) runSlot(slot);
+  }
 }
 
-async function scanShot(shot) {
-  if (!scan.shots.includes(shot)) return; // removed while queued
-  scan.current = shot;
+// Each slot reads one screenshot at a time with its own worker, until nothing is waiting.
+async function runSlot(slot) {
+  while (scan.pending.length) {
+    const shot = scan.pending.shift();
+    if (!scan.shots.includes(shot)) continue; // removed while queued
+    scan.busy[slot] = shot;
+    await scanShot(shot, slot).catch(() => {});
+    scan.busy[slot] = null;
+  }
+}
+
+async function scanShot(shot, slot) {
   shot.status = 'scanning';
   shot.progress = 0;
   renderShots();
+  const start = performance.now();
+  const timings = {};
+  let mark = start;
+  const lap = (label) => { const now = performance.now(); timings[label] = Math.round(now - mark); mark = now; };
   try {
     shot.img ??= await loadImage(shot.file);
-    const worker = await getWorker();
+    await ensureNames();
+    const worker = await getWorker(slot);
+    lap('setup');
 
     // Pass 1: brightness threshold.
     let { canvas, scale } = preprocess(shot.img, Number($('#scanThreshold').value));
     const first = await readNames(worker, canvas, scale);
-    let { detections, h } = first;
+    let { detections, textH } = first;
+    lap('read');
 
-    // Pass 2: keep only the text colour learned from pass 1, which strips most item art, then keep the
-    // better reading of every tile from either pass.
+    // Pass 2: keep only the text colour learned from pass 1, which strips most item art. That image is used
+    // for everything after this; it's read in full only if pass 1 may have missed names.
     shot.textColor = estimateTextColor(shot.img, first.detections);
     if (shot.textColor) {
-      shot.status = 'refining';
-      renderShots();
       ({ canvas, scale } = preprocessColor(shot.img, shot.textColor));
-      const second = await readNames(worker, canvas, scale);
-      detections = mergeDetections([...second.detections, ...first.detections]);
-      h = second.h || h;
+      if (!looksComplete(first.detections, first.textH)) {
+        shot.status = 'refining';
+        renderShots();
+        const second = await readNames(worker, canvas, scale);
+        detections = mergeDetections([...second.detections, ...first.detections]);
+        textH = second.textH || textH;
+        lap('colour');
+      }
     }
     shot.processed = canvas;
-    detections = await rereadNames(worker, canvas, scale, detections, h);
+    detections = await rereadNames(worker, canvas, scale, detections, textH);
+    lap('reread');
 
     shot.status = 'counting';
     renderShots();
-    await readCounts(worker, canvas, scale, detections, h); // on the cleanest image, so art isn't read as digits
+    await readCounts(canvas, scale, detections, textH); // on the cleanest image, so art isn't read as digits
+    lap('counts');
     shot.detections = detections;
     shot.status = 'done';
   } catch (err) {
     shot.status = 'error';
     shot.error = err.message;
   }
-  scan.current = null;
+  shot.seconds = (performance.now() - start) / 1000;
+  shot.timings = timings;
   renderShots();
   aggregate();
 }
@@ -445,9 +693,9 @@ async function scanShot(shot) {
 async function readNames(worker, canvas, scale) {
   await worker.setParameters(NAME_PARAMS);
   const { data } = await worker.recognize(canvas, {}, { blocks: true });
-  const { detections, h } = analyze(wordsFrom(data), scale);
+  const { detections, textH } = analyze(wordsFrom(data), scale);
   detections.forEach(matchDetection);
-  return { detections, h };
+  return { detections, textH };
 }
 
 // Detections from both passes describe the same tiles; where boxes overlap, keep the better match.
@@ -461,14 +709,16 @@ function mergeDetections(all) {
 
 // ---------- merging screenshots ----------
 
+const detectionKey = (d) => (d.match ? `item:${d.match.item.slug}|${d.match.subtype ?? ''}` : 'raw:' + d.norm);
+
 function aggregate() {
   const groups = new Map();
   for (const shot of scan.shots) {
     for (const d of shot.detections) {
-      if (!d.match && d.norm.replace(/ /g, '').length < 6) continue; // short junk text
-      const key = d.match ? 'item:' + d.match.item.slug : 'raw:' + d.norm;
+      if (!d.match && textWeight(d.norm, true) < 6) continue; // short junk text
+      const key = detectionKey(d);
       let g = groups.get(key);
-      if (!g) groups.set(key, (g = { key, item: d.match?.item ?? null, score: 0, ambiguous: true, perShot: new Map(), texts: new Set() }));
+      if (!g) groups.set(key, (g = { key, item: d.match?.item ?? null, subtype: d.match?.subtype ?? null, score: 0, ambiguous: true, perShot: new Map(), texts: new Set() }));
       g.perShot.set(shot.id, (g.perShot.get(shot.id) || 0) + d.qty);
       g.score = Math.max(g.score, d.match?.score ?? 0);
       if (d.match && !d.match.ambiguous) g.ambiguous = false; // one clear reading is enough
@@ -478,9 +728,11 @@ function aggregate() {
   scan.rows = [...groups.values()].map((g) => {
     const edit = scan.edits.get(g.key) || {};
     const item = edit.slug !== undefined ? state.bySlug.get(edit.slug) ?? null : g.item;
+    const subtype = edit.subtype ?? g.subtype;
     return {
       key: g.key,
       item,
+      subtype: item?.subtypes?.includes(subtype) ? subtype : item?.subtypes?.[0] ?? null,
       qty: edit.qty ?? Math.max(...g.perShot.values()),
       shots: [...g.perShot.keys()],
       score: g.score,
@@ -497,44 +749,57 @@ function aggregate() {
 
 function shotLabel(id) { return '#' + (scan.shots.findIndex((s) => s.id === id) + 1); }
 
+const BUSY = ['queued', 'scanning', 'refining', 'counting'];
+
 function renderShots() {
-  $('#shots').innerHTML = scan.shots.map((s, i) => {
+  fill($('#shots'), scan.shots.map((s, i) => {
     let status = s.status;
     if (s.status === 'scanning') status = `reading ${Math.round(s.progress * 100)}%`;
     if (s.status === 'refining') status = 'reading again…';
     if (s.status === 'counting') status = 'reading counts…';
     if (s.status === 'done') status = `${s.detections.filter((d) => d.match).length} items`;
     if (s.status === 'error') status = 'error';
-    return `<div class="shot${s.id === scan.previewId ? ' active' : ''}" data-id="${s.id}" title="${esc(s.error || s.name)}">
-      <span class="shot-n">#${i + 1}</span>
-      <span class="shot-status ${s.status}">${esc(status)}</span>
-      <button class="icon" data-action="remove-shot" title="Remove screenshot">✕</button>
-    </div>`;
-  }).join('');
+    const title = s.error || (s.seconds && s.status === 'done' ? `${s.name} · read in ${s.seconds.toFixed(1)} s` : s.name);
+    return h('div', { class: `shot${s.id === scan.previewId ? ' active' : ''}`, 'data-id': s.id, title },
+      h('span', { class: 'shot-n' }, `#${i + 1}`),
+      h('span', { class: `shot-status ${s.status}` }, status),
+      h('button', { class: 'icon', 'data-action': 'remove-shot', title: 'Remove screenshot' }, '✕'));
+  }));
   $('#scanEmpty').hidden = scan.shots.length > 0;
   $('#scanResults').hidden = scan.shots.length === 0;
-  const busy = scan.shots.some((s) => ['queued', 'scanning', 'refining', 'counting'].includes(s.status));
+  const busy = scan.shots.some((s) => BUSY.includes(s.status));
   $('#scanStatus').textContent = busy
-    ? (scan.worker ? 'Reading screenshots…' : 'Loading text recognition (first time takes a few seconds)…')
+    ? (scan.workers.some(Boolean) ? 'Reading screenshots…' : 'Loading text recognition (first time takes a few seconds)…')
     : '';
+}
+
+let shotsQueued = false;
+function renderShotsSoon() {
+  if (shotsQueued) return;
+  shotsQueued = true;
+  requestAnimationFrame(() => { shotsQueued = false; renderShots(); });
 }
 
 function renderScanRows() {
   const showUnknown = $('#scanShowUnknown').checked;
   const rows = scan.rows.filter((r) => r.item || showUnknown);
   const unknown = scan.rows.filter((r) => !r.item).length;
-  $('#scanTable tbody').innerHTML = rows.map((r) => {
+  fill($('#scanTable tbody'), rows.map((r) => {
     const conf = r.item ? Math.round(r.score * 100) : 0;
     const confCls = !r.item || r.ambiguous ? 'bad' : r.score >= 0.85 ? 'good' : r.score >= 0.75 ? 'plat' : 'bad';
-    return `<tr data-key="${esc(r.key)}">
-      <td><input type="checkbox" data-field="checked"${r.checked ? ' checked' : ''}></td>
-      <td><input class="scan-item" list="itemNames" data-field="slug" value="${r.ambiguous ? '' : esc(r.item?.name ?? '')}" placeholder="${r.ambiguous ? 'Which item is this?' : 'Pick the right item…'}"></td>
-      <td class="r"><input class="num" type="number" min="1" data-field="qty" value="${r.qty}"></td>
-      <td class="muted">${r.shots.map(shotLabel).join(' ')}</td>
-      <td class="muted ocr" title="${esc(r.text)}">${esc(r.text)}</td>
-      <td class="r ${confCls}"${r.ambiguous ? ' title="Only part of the name was readable and it fits several items"' : ''}>${r.ambiguous ? 'unclear' : r.item ? conf + '%' : '—'}</td>
-    </tr>`;
-  }).join('');
+    return h('tr', { 'data-key': r.key },
+      h('td', null, h('input', { type: 'checkbox', 'data-field': 'checked', checked: r.checked })),
+      h('td', null, h('div', { class: 'scan-item-wrap' },
+        h('input', { class: 'scan-item', list: 'itemNames', 'data-field': 'slug', value: r.ambiguous ? '' : r.item?.name ?? '',
+          placeholder: r.ambiguous ? 'Which item is this?' : 'Pick the right item…' }),
+        r.item?.subtypes && !r.ambiguous && h('select', { class: 'scan-subtype', 'data-field': 'subtype', title: 'Refinement' },
+          r.item.subtypes.map((s) => h('option', { selected: s === r.subtype }, s))))),
+      h('td', { class: 'r' }, h('input', { class: 'num', type: 'number', min: 1, 'data-field': 'qty', value: r.qty })),
+      h('td', { class: 'muted' }, r.shots.map(shotLabel).join(' ')),
+      h('td', { class: 'muted ocr', title: r.text }, r.text),
+      h('td', { class: `r ${confCls}`, title: r.ambiguous ? 'Only part of the name was readable and it fits several items' : null },
+        r.ambiguous ? 'unclear' : r.item ? `${conf}%` : '—'));
+  }));
   const checked = scan.rows.filter((r) => r.checked && r.item && !r.ambiguous);
   const unclear = scan.rows.filter((r) => r.ambiguous).length;
   $('#scanSummary').textContent = `${scan.rows.length - unknown - unclear} matched, ${checked.length} selected` + (unclear ? `, ${unclear} unclear (pick the item)` : '') + (unknown ? `, ${unknown} unrecognised text${unknown === 1 ? '' : 's'}` : '');
@@ -547,16 +812,16 @@ function renderPreview() {
   if (!shot || !shot.img) { canvas.hidden = true; return; }
   canvas.hidden = false;
   const src = $('#scanProcessed').checked && shot.processed ? shot.processed : shot.img;
-  const w = shot.img.naturalWidth, h = shot.img.naturalHeight;
+  const w = shot.img.naturalWidth, imgH = shot.img.naturalHeight;
   canvas.width = w;
-  canvas.height = h;
+  canvas.height = imgH;
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(src, 0, 0, w, h);
+  ctx.drawImage(src, 0, 0, w, imgH);
   const lw = Math.max(2, w / 800);
   ctx.lineWidth = lw;
   ctx.font = `${Math.max(12, w / 110)}px system-ui, sans-serif`;
   for (const d of shot.detections) {
-    const row = scan.rows.find((r) => r.key === (d.match ? 'item:' + d.match.item.slug : 'raw:' + d.norm));
+    const row = scan.rows.find((r) => r.key === detectionKey(d));
     const item = row && !row.ambiguous ? row.item : null; // unclear readings stay orange until picked
     const color = item ? '#5cc98a' : '#e0a050';
     ctx.strokeStyle = color;
@@ -567,7 +832,7 @@ function renderPreview() {
       ctx.strokeRect(c.x0 - lw, c.y0 - lw, c.x1 - c.x0 + 2 * lw, c.y1 - c.y0 + 2 * lw);
     }
     if (item) {
-      const label = `${item.name} ×${d.qty}`;
+      const label = `${item.name}${row.subtype && row.subtype !== item.subtypes[0] ? ` (${row.subtype})` : ''} ×${d.qty}`;
       const tw = ctx.measureText(label).width;
       const lh = parseInt(ctx.font, 10) * 1.3;
       ctx.fillStyle = 'rgba(0,0,0,0.75)';
@@ -581,13 +846,15 @@ function renderPreview() {
 // ---------- adding to the list ----------
 
 function addScanToList() {
-  const bySlug = new Map();
+  const byKey = new Map();
   for (const r of scan.rows) {
     if (!r.checked || !r.item || r.ambiguous) continue;
     // Two rows resolving to one item are most likely the same tile misread differently: keep the max.
-    bySlug.set(r.item.slug, Math.max(bySlug.get(r.item.slug) || 0, r.qty));
+    const key = `${r.item.slug}|${r.subtype ?? ''}`;
+    const prev = byKey.get(key);
+    byKey.set(key, { slug: r.item.slug, subtype: r.subtype, qty: Math.max(prev?.qty ?? 0, r.qty) });
   }
-  const entries = [...bySlug].map(([slug, qty]) => ({ slug, qty, rank: null, subtype: null }));
+  const entries = [...byKey.values()].map((e) => ({ ...e, rank: null }));
   const setQty = $('#scanMode').value === 'set';
   addEntries(entries, { setQty });
   setStatus(`${setQty ? 'Updated' : 'Added'} ${entries.length} items from screenshots.`);
@@ -630,6 +897,18 @@ function wireScan() {
     renderPreview();
   });
 
+  // Game language: remembered, and screenshots already added are read again in the new language.
+  const langSelect = $('#scanLang');
+  langSelect.append(...Object.entries(GAME_LANGS).map(([code, l]) => h('option', { value: code }, l.label)));
+  setLanguage(storageGet('scanLang', guessLanguage()));
+  langSelect.value = scan.lang;
+  langSelect.addEventListener('change', () => {
+    setLanguage(langSelect.value);
+    storageSet('scanLang', scan.lang);
+    scan.shots.forEach(enqueue);
+    renderShots();
+  });
+
   $('#scanThreshold').addEventListener('input', () => { $('#scanThresholdVal').textContent = $('#scanThreshold').value; });
   $('#scanRescan').addEventListener('click', () => { scan.shots.forEach(enqueue); renderShots(); });
   $('#scanCategory').addEventListener('change', () => {
@@ -641,6 +920,7 @@ function wireScan() {
   $('#scanShowUnknown').addEventListener('change', renderScanRows);
   $('#scanClear').addEventListener('click', () => {
     scan.shots = [];
+    scan.pending = [];
     scan.rows = [];
     scan.edits.clear();
     scan.previewId = null;
@@ -657,6 +937,7 @@ function wireScan() {
     const edit = scan.edits.get(key) || {};
     if (field === 'checked') edit.checked = ev.target.checked;
     if (field === 'qty') edit.qty = Math.max(1, Number(ev.target.value) || 1);
+    if (field === 'subtype') edit.subtype = ev.target.value;
     if (field === 'slug') {
       const item = findItem(ev.target.value);
       edit.slug = item ? item.slug : null;
