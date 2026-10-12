@@ -40,7 +40,8 @@ async function api(path, method = 'GET', data) {
 function category(item) {
   const t = item.tags;
   if (t.includes('prime') && t.includes('set')) return 'Prime Set';
-  if (t.includes('prime') && t.includes('component')) return 'Prime Part';
+  // Main blueprints ("Hydroid Prime Blueprint") are tagged "blueprint" rather than "component".
+  if (t.includes('prime') && (t.includes('component') || t.includes('blueprint'))) return 'Prime Part';
   if (t.includes('mod')) return 'Mod';
   if (t.includes('arcane_enhancement')) return 'Arcane';
   if (t.includes('relic')) return 'Relic';

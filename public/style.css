@@ -186,3 +186,6 @@ label.field input { color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .steps { padding-left: 20px; margin: 10px 0; line-height: 1.7; }
 dialog { width: min(520px, calc(100vw - 32px)); }
+/* Table number boxes: no spinner arrows covering the digits */
+td input.num { width: 68px; -moz-appearance: textfield; appearance: textfield; }
+td input.num::-webkit-outer-spin-button, td input.num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
