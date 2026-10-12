@@ -12,7 +12,8 @@ Selling prime parts and mods on warframe.market, without the busywork.
 - **Scan your inventory from screenshots.** Take screenshots of your in-game inventory while scrolling and drop them in. Item names, counts and relic refinements are read on your computer, and overlapping screenshots are handled for you. Works with the game in English, Ukrainian, Spanish and Chinese (Simplified and Traditional).
 - **See what everything is worth right now:** the cheapest online seller, the median price, the best buy offer, ducats and ducats-per-platinum, plus which complete prime sets you could sell.
 - **List in one click,** at the lowest online price, a few platinum under it, or your own price, and as many as you want to sell. Or list everything at once.
-- **Mark items sold** and they leave your list; the order on warframe.market is closed too. Sales you mark on the website are picked up automatically, with a notification.
+- **Stay the cheapest:** reprice all your listings to just under the other online sellers in one click, or hide them while you can't trade.
+- **Mark items sold** (or traded to Baro Ki'Teer for ducats) and they leave your list; the order on warframe.market is closed too. Sales you mark on the website are picked up automatically, with a notification.
 - **Sales history** and a ready-made "WTS" message for trade chat.
 
 Uses your existing warframe.market login in this browser (Steam, Google, Discord or password); there is nothing to set up.

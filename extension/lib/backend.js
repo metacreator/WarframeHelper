@@ -240,6 +240,8 @@ const Backend = (() => {
       bestBuy: buys[0] ?? null,
       sellers: sells.length,
       buyers: buys.length,
+      // Who those sellers are, so your own listing can be left out when pricing against the others.
+      sellOrders: top.sell.map((o) => ({ platinum: o.platinum, user: o.user?.slug ?? null })),
       fetchedAt: Date.now(),
     };
     prices[key] = summary;

@@ -5,7 +5,9 @@
 //
 // De-duplication rule: Warframe stacks identical items into one tile with a count, so the same item seen
 // in two screenshots is the same tile seen twice. Within one screenshot, tiles of the same item are summed
-// (e.g. one mod at two ranks); across screenshots we take the highest per-screenshot total, not the sum.
+// (e.g. one mod at two ranks); across screenshots the newest one where a count was visible wins (counts
+// change as you trade). A tile without a visible count doesn't override a count seen before: the count may
+// just be cut off, so the quantity is assumed unchanged.
 
 // Tesseract is bundled with the add-on (extensions may not load code from the internet).
 const TESSERACT_DIR = 'vendor/tesseract';
@@ -609,7 +611,8 @@ function boxesOverlap(a, b) {
 function addShots(files) {
   for (const file of files) {
     if (!file.type.startsWith('image/')) continue;
-    const shot = { id: scan.nextId++, name: file.name || `pasted-${scan.nextId}.png`, file, img: null, status: 'queued', progress: 0, detections: [] };
+    // When it was taken: files keep their time; pasted screenshots get the time they were pasted.
+    const shot = { id: scan.nextId++, name: file.name || `pasted-${scan.nextId}.png`, file, time: file.lastModified || Date.now(), img: null, status: 'queued', progress: 0, detections: [] };
     scan.shots.push(shot);
     if (scan.previewId === null) scan.previewId = shot.id;
     enqueue(shot);
@@ -719,7 +722,10 @@ function aggregate() {
       const key = detectionKey(d);
       let g = groups.get(key);
       if (!g) groups.set(key, (g = { key, item: d.match?.item ?? null, subtype: d.match?.subtype ?? null, score: 0, ambiguous: true, perShot: new Map(), texts: new Set() }));
-      g.perShot.set(shot.id, (g.perShot.get(shot.id) || 0) + d.qty);
+      const seen = g.perShot.get(shot.id) ?? { shot, qty: 0, counted: false };
+      seen.qty += d.qty;
+      seen.counted ||= !!d.countBox; // a count was read on the tile (no number on a tile means 1, or cut off)
+      g.perShot.set(shot.id, seen);
       g.score = Math.max(g.score, d.match?.score ?? 0);
       if (d.match && !d.match.ambiguous) g.ambiguous = false; // one clear reading is enough
       g.texts.add(d.text);
@@ -727,13 +733,18 @@ function aggregate() {
   }
   scan.rows = [...groups.values()].map((g) => {
     const edit = scan.edits.get(g.key) || {};
+    const seen = [...g.perShot.values()].sort((a, b) => a.shot.time - b.shot.time || a.shot.id - b.shot.id);
+    const counted = seen.filter((x) => x.counted);
+    const latest = counted.length ? counted[counted.length - 1] : seen[seen.length - 1];
     const item = edit.slug !== undefined ? state.bySlug.get(edit.slug) ?? null : g.item;
     const subtype = edit.subtype ?? g.subtype;
     return {
       key: g.key,
       item,
       subtype: item?.subtypes?.includes(subtype) ? subtype : item?.subtypes?.[0] ?? null,
-      qty: edit.qty ?? Math.max(...g.perShot.values()),
+      qty: edit.qty ?? latest.qty,
+      // false: no count was visible anywhere, so an item already in your list keeps its quantity
+      qtySeen: edit.qty !== undefined || counted.length > 0,
       shots: [...g.perShot.keys()],
       score: g.score,
       ambiguous: edit.slug === undefined && !!g.item && g.ambiguous, // until the player picks an item
@@ -794,7 +805,8 @@ function renderScanRows() {
           placeholder: r.ambiguous ? 'Which item is this?' : 'Pick the right item…' }),
         r.item?.subtypes && !r.ambiguous && h('select', { class: 'scan-subtype', 'data-field': 'subtype', title: 'Refinement' },
           r.item.subtypes.map((s) => h('option', { selected: s === r.subtype }, s))))),
-      h('td', { class: 'r' }, h('input', { class: 'num', type: 'number', min: 1, 'data-field': 'qty', value: r.qty })),
+      h('td', { class: 'r' }, h('input', { class: r.qtySeen ? 'num' : 'num qty-unseen', type: 'number', min: 1, 'data-field': 'qty', value: r.qty,
+        title: r.qtySeen ? null : 'No count visible: an item already in your list keeps its quantity (type a number to set it)' })),
       h('td', { class: 'muted' }, r.shots.map(shotLabel).join(' ')),
       h('td', { class: 'muted ocr', title: r.text }, r.text),
       h('td', { class: `r ${confCls}`, title: r.ambiguous ? 'Only part of the name was readable and it fits several items' : null },
@@ -849,15 +861,18 @@ function addScanToList() {
   const byKey = new Map();
   for (const r of scan.rows) {
     if (!r.checked || !r.item || r.ambiguous) continue;
-    // Two rows resolving to one item are most likely the same tile misread differently: keep the max.
+    // Two rows resolving to one item are most likely the same tile misread differently: keep the max,
+    // preferring a count that was actually seen.
     const key = `${r.item.slug}|${r.subtype ?? ''}`;
     const prev = byKey.get(key);
-    byKey.set(key, { slug: r.item.slug, subtype: r.subtype, qty: Math.max(prev?.qty ?? 0, r.qty) });
+    const qty = prev && prev.qtyKnown !== r.qtySeen ? (r.qtySeen ? r.qty : prev.qty) : Math.max(prev?.qty ?? 0, r.qty);
+    byKey.set(key, { slug: r.item.slug, subtype: r.subtype, qty, qtyKnown: r.qtySeen || !!prev?.qtyKnown });
   }
   const entries = [...byKey.values()].map((e) => ({ ...e, rank: null }));
   const setQty = $('#scanMode').value === 'set';
   addEntries(entries, { setQty });
-  setStatus(`${setQty ? 'Updated' : 'Added'} ${entries.length} items from screenshots.`);
+  setStatus(`${setQty ? 'Updated' : 'Added'} ${entries.length} items from screenshots.`
+    + (setQty && entries.some((e) => !e.qtyKnown) ? ' Items without a visible count kept the quantity they had.' : ''));
 }
 
 // ---------- events ----------

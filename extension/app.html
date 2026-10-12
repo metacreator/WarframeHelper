@@ -129,10 +129,11 @@
         </select>
         <input id="fText" placeholder="Filter by name">
         <label>Min plat <input id="fMin" type="number" min="0" value="0" class="num"></label>
+        <label title="Ducats per platinum. 10 or more usually means Baro Ki'Teer pays better than players.">Min D/P <input id="fDpp" type="number" min="0" step="1" value="0" class="num"></label>
       </div>
 
       <div class="row listbar">
-        <label title="Default listing price for items where you haven't typed your own">Default price: lowest online
+        <label title="Default listing price for items where you haven't typed your own">Default price: cheapest other seller online
           − <input id="undercut" type="number" min="0" value="0" class="num"> p</label>
         <button id="listAllBtn" type="button">List all unlisted</button>
         <button id="clearBtn" type="button" class="danger" title="Remove everything that is not listed">Clear unlisted</button>
@@ -153,6 +154,12 @@
 
       <details id="listedSection" class="item-section" open>
         <summary><h3>Listed on warframe.market</h3> <span class="count" data-count="listed"></span></summary>
+        <div class="row listed-bar">
+          <button id="repriceBtn" type="button" title="Move every listing shown to the default price (cheapest other seller online − undercut), up or down. Asks first.">Reprice listings</button>
+          <button id="hideAllBtn" type="button" class="secondary" title="Keep your listings but hide them from buyers, e.g. while you can't trade">Hide all</button>
+          <button id="showAllBtn" type="button" class="secondary">Show all</button>
+          <span class="hint">Rows where you typed your own "Sell at" price keep it.</span>
+        </div>
         <div class="table-wrap">
           <table class="items" id="tableListed"><thead></thead><tbody></tbody></table>
         </div>

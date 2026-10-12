@@ -97,7 +97,8 @@ async function reloadInventory() {
   state.inventory = (await Backend.getInventory()).filter((e) => state.bySlug.has(e.slug)).map(normalizeEntry);
 }
 
-// setQty: overwrite the quantity of items already in the list instead of adding to it (used by re-scans).
+// setQty: overwrite the quantity of items already in the list instead of adding to it (used by re-scans),
+// except for entries marked qtyKnown: false (no count was visible on the screenshot): those keep theirs.
 function addEntries(entries, { replace = false, setQty = false } = {}) {
   if (replace) state.inventory = [];
   const added = [];
@@ -112,8 +113,10 @@ function addEntries(entries, { replace = false, setQty = false } = {}) {
       if (sameItem.length === 1) existing = sameItem[0];
     }
     if (existing) {
-      existing.qty = setQty ? e.qty : existing.qty + e.qty;
+      if (!setQty) existing.qty += e.qty;
+      else if (raw.qtyKnown !== false) existing.qty = e.qty;
       existing.rankKnown ||= e.rankKnown;
+      Object.assign(existing, normalizeEntry(existing)); // keeps "List qty" within a lowered quantity
     } else { state.inventory.push(e); added.push(e); }
   }
   saveInventory();
@@ -384,6 +387,106 @@ async function soldEntry(entry, preset) {
   render();
 }
 
+// Traded to Baro Ki'Teer for ducats: the items leave the list, and a listing for them shrinks or goes too.
+async function baroEntry(entry) {
+  const r = buildRow(entry);
+  let qty = entry.qty;
+  if (entry.qty > 1) {
+    const answer = prompt(`How many ${r.name} did you trade to Baro Ki'Teer? (1–${entry.qty})`, String(entry.qty));
+    if (answer === null) return;
+    qty = Math.min(entry.qty, Math.round(Number(answer)));
+    if (!(qty >= 1)) return;
+  }
+  const left = entry.qty - qty;
+  if (r.listing && !entry.gone && left < r.listing.quantity) {
+    if (!state.auth.connected) { setStatus(`${r.name} is listed on warframe.market. Log in there first, so the listing can be lowered too.`); return; }
+    await rowAction(entry, 'Updating the listing', () => (left > 0
+      ? Backend.updateOrder(r.listing.id, { quantity: left })
+      : Backend.deleteOrder(r.listing.id)));
+    if ((listingFor(entry)?.quantity ?? 0) > left) return; // the change failed; the error is in the status line
+  }
+  recordSales([{ slug: entry.slug, name: r.name, qty, platinum: null, ducats: r.ducats, how: "traded to Baro Ki'Teer" }]);
+  removeQuantity(entry, qty);
+  setStatus(`Traded ${qty}× ${r.name} to Baro Ki'Teer for ${(r.ducats * qty).toLocaleString()} ducats.`);
+  render();
+}
+
+function toggleVisible(entry) {
+  if (!requireAuth()) return;
+  const r = buildRow(entry);
+  const visible = r.listing.visible === false;
+  rowAction(entry, visible ? 'Showing' : 'Hiding', async () => {
+    await Backend.updateOrder(r.listing.id, { visible });
+    setStatus(visible ? `${r.name} is visible on warframe.market again.` : `${r.name} is hidden: still listed, but nobody sees it.`);
+  });
+}
+
+// Listings whose price isn't where the default would put it: the cheapest other online seller minus your
+// undercut, up or down. Rows with your own "Sell at" price keep it, and too-low prices are left alone.
+function repriceTargets(rows) {
+  const listed = rows.filter((r) => r.listing && !r.e.gone);
+  const own = listed.filter((r) => r.e.price);
+  const auto = listed.filter((r) => !r.e.price);
+  return {
+    own,
+    alone: auto.filter((r) => r.lowestOther === null),
+    cheap: auto.filter((r) => r.sellAt && underpriced(r)),
+    changes: auto.filter((r) => r.sellAt && !underpriced(r) && r.sellAt !== r.listing.platinum),
+  };
+}
+
+async function repriceListings() {
+  if (!requireAuth()) return;
+  $('#repriceBtn').disabled = true;
+  try {
+    await ensureFreshPrices(filteredRows().filter((r) => r.listing && !r.e.gone).map((r) => r.e));
+  } finally {
+    $('#repriceBtn').disabled = false;
+  }
+  const { own, alone, cheap, changes } = repriceTargets(filteredRows());
+  const skipped = [
+    own.length ? `Kept your own "Sell at" price (${own.length}): ${own.map((r) => `${r.name} ${r.e.price}p`).join(', ')}` : '',
+    alone.length ? `No other seller online (${alone.length}): ${alone.map((r) => r.name).join(', ')}` : '',
+    cheap.length ? `Skipped, price would be too low (${cheap.length}): ${cheap.map((r) => `${r.name} ${r.sellAt}p vs median ${r.medianSell}p`).join(', ')}` : '',
+  ].filter(Boolean).join('\n\n');
+  if (!changes.length) { setStatus('All listings are already at their price.' + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
+  if (!confirm(`Change the price of ${changes.length} listing${changes.length === 1 ? '' : 's'}?\n\n`
+    + changes.slice(0, 20).map((r) => `${r.name}: ${r.listing.platinum}p → ${r.sellAt}p`).join('\n') + (changes.length > 20 ? `\n…and ${changes.length - 20} more` : '')
+    + (skipped ? `\n\n${skipped}` : ''))) return;
+  await bulkUpdate(changes, (r) => ({ platinum: r.sellAt }), 'Repricing', (n) => `Repriced ${n} listing${n === 1 ? '' : 's'}.`);
+}
+
+async function setAllVisible(visible) {
+  if (!requireAuth()) return;
+  const rows = filteredRows().filter((r) => r.listing && !r.e.gone && (r.listing.visible !== false) !== visible);
+  if (!rows.length) { setStatus(visible ? 'All your listings are already visible.' : 'All your listings are already hidden.'); return; }
+  await bulkUpdate(rows, () => ({ visible }), visible ? 'Showing' : 'Hiding', (n) => `${visible ? 'Showing' : 'Hid'} ${n} listing${n === 1 ? '' : 's'}.`);
+}
+
+// Changes listings one after another (the API allows a few requests per second), then reloads them.
+async function bulkUpdate(rows, patch, verb, done) {
+  const buttons = ['#repriceBtn', '#hideAllBtn', '#showAllBtn'].map($);
+  buttons.forEach((b) => { b.disabled = true; });
+  let ok = 0;
+  const failed = [];
+  try {
+    for (const r of rows) {
+      setStatus(`${verb} ${ok + failed.length + 1} of ${rows.length}: ${r.name}`);
+      try {
+        await Backend.updateOrder(r.listing.id, patch(r));
+        ok++;
+      } catch (err) {
+        failed.push(`${r.name} (${err.message})`);
+        if (err.status === 401) { await loadAuth(); break; }
+      }
+    }
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+  await loadListings(true);
+  setStatus(done(ok) + (failed.length ? ` Failed: ${failed.join('; ')}` : ''));
+}
+
 async function listAllUnlisted() {
   if (!requireAuth()) return;
   $('#listAllBtn').disabled = true;
@@ -440,13 +543,19 @@ function recordSales(sales) {
 
 function renderSales() {
   const total = state.sales.reduce((s, x) => s + (x.platinum ?? 0) * x.qty, 0);
-  $('#salesSummary').textContent = state.sales.length ? `${state.sales.length} sales · ${total.toLocaleString()}p` : 'nothing sold yet';
+  const ducats = state.sales.reduce((s, x) => s + (x.platinum ? 0 : (x.ducats ?? 0) * x.qty), 0);
+  $('#salesSummary').textContent = state.sales.length
+    ? `${state.sales.length} sales · ${total.toLocaleString()}p${ducats ? ` · ${ducats.toLocaleString()} ducats` : ''}`
+    : 'nothing sold yet';
+  // Trades to Baro Ki'Teer earned ducats instead of platinum.
+  const amount = (s, n, tag) => (s.platinum ? plat(s.platinum * n, tag)
+    : s.ducats ? h(tag, { class: 'ducats', title: 'Ducats' }, `${(s.ducats * n).toLocaleString()} d`) : dash());
   fill($('#salesTable tbody'), [...state.sales].reverse().map((s) => h('tr', null,
     h('td', { class: 'muted' }, new Date(s.at).toLocaleString()),
     h('td', null, s.name ?? s.slug),
     h('td', { class: 'r' }, s.qty),
-    h('td', { class: 'r' }, s.platinum ? plat(s.platinum) : dash()),
-    h('td', { class: 'r' }, s.platinum ? plat(s.platinum * s.qty, 'b') : dash()),
+    h('td', { class: 'r' }, amount(s, 1, 'span')),
+    h('td', { class: 'r' }, amount(s, s.qty, 'b')),
     h('td', { class: 'muted' }, s.how ?? ''))));
 }
 
@@ -457,6 +566,10 @@ function buildRow(e) {
   const price = state.prices.get(rowKey(e));
   const listing = listingFor(e);
   const lowest = price?.lowestSell ?? null;
+  // Your own listing is among the online sellers whenever you're online: price against everyone else.
+  const me = state.auth.user?.slug;
+  const others = price?.sellOrders?.filter((o) => !me || o.user !== me).map((o) => o.platinum);
+  const lowestOther = others ? (others.length ? Math.min(...others) : null) : lowest;
   return {
     e, item, price, listing,
     key: rowKey(e),
@@ -464,12 +577,13 @@ function buildRow(e) {
     category: category(item),
     qty: e.qty,
     lowestSell: lowest,
+    lowestOther,
     medianSell: price?.medianSell ?? null,
     bestBuy: price?.bestBuy ?? null,
     value: lowest !== null ? lowest * e.qty : null,
     ducats: item.ducats,
     dpp: item.ducats && lowest ? item.ducats / lowest : null,
-    sellAt: e.price ?? defaultPrice(lowest),
+    sellAt: e.price ?? defaultPrice(lowestOther),
     listed: listing ? listing.platinum : null,
     rankKnown: e.rankKnown || !!listing,
   };
@@ -501,11 +615,13 @@ function filteredRows() {
   const cat = $('#fCategory').value;
   const text = $('#fText').value.trim().toLowerCase();
   const min = Number($('#fMin').value) || 0;
+  const minDpp = Number($('#fDpp').value) || 0;
   const { col, dir } = state.sort;
   return state.inventory.map(buildRow)
     .filter((r) => (!cat || r.category === cat)
       && (!text || r.name.toLowerCase().includes(text))
-      && (min === 0 || (r.lowestSell ?? 0) >= min))
+      && (min === 0 || (r.lowestSell ?? 0) >= min)
+      && (minDpp === 0 || (r.dpp ?? 0) >= minDpp))
     .sort((a, b) => {
       const x = a[col], y = b[col];
       if (x === y) return a.name.localeCompare(b.name);
@@ -548,6 +664,8 @@ function listingCell(r) {
   const button = (action, label, attrs) => h('button', { class: 'small', 'data-action': action, ...attrs }, label);
   const sold = button('sold', 'Sold', { class: 'small secondary', disabled: busy,
     title: `Remove sold items from your list${listing && state.auth.connected ? ' and close the order on warframe.market' : ''}` });
+  const baro = r.ducats > 0 && button('baro', 'Baro', { class: 'small secondary',
+    title: `Traded to Baro Ki'Teer for ${r.ducats} ducats each: removes them from your list${listing ? ' and lowers the listing' : ''}` });
 
   if (e.gone) {
     return h('div', { class: 'actions' },
@@ -559,17 +677,21 @@ function listingCell(r) {
 
   if (!listing) {
     const title = !r.rankKnown ? 'Set the rank first' : state.auth.connected ? `List ${listQtyOf(e)}× at ${r.sellAt ?? '?'}p` : 'Log in on warframe.market to list';
-    return h('div', { class: 'actions' }, dash(), button('list', 'List', { disabled: !(r.sellAt && r.rankKnown), title }), sold);
+    return h('div', { class: 'actions' }, dash(), button('list', 'List', { disabled: !(r.sellAt && r.rankKnown), title }), sold, baro);
   }
 
-  const above = r.lowestSell !== null && listing.platinum > r.lowestSell;
+  const above = r.lowestOther !== null && listing.platinum > r.lowestOther;
   const changed = (!!r.sellAt && r.sellAt !== listing.platinum) || listing.quantity !== listQtyOf(e);
+  const hidden = listing.visible === false;
   return h('div', { class: 'actions' },
-    h('span', { class: above ? 'bad' : 'good', title: above ? 'Priced above the cheapest online seller' : 'Competitive' },
-      `${listing.platinum}p ×${listing.quantity}${listing.visible === false ? ' (hidden)' : ''}`),
+    h('span', { class: hidden ? 'muted' : above ? 'bad' : 'good',
+      title: hidden ? 'Hidden: still listed, but nobody sees it' : above ? 'Priced above the cheapest other online seller' : 'Competitive' },
+      `${listing.platinum}p ×${listing.quantity}${hidden ? ' (hidden)' : ''}`),
     state.auth.connected && changed && button('update', 'Update', { title: `Change listing to ${listQtyOf(e)}× at ${r.sellAt}p` }),
+    state.auth.connected && button('toggle-visible', hidden ? 'Show' : 'Hide', { class: 'small secondary',
+      title: hidden ? 'Make this listing visible on warframe.market again' : 'Keep the listing but hide it from buyers' }),
     state.auth.connected && button('unlist', 'Unlist', { class: 'small secondary' }),
-    sold);
+    sold, baro);
 }
 
 // Both item tables (not listed / listed) share these columns.
@@ -609,7 +731,7 @@ function rowEl(r) {
     cell(fmt(r.ducats)),
     cell(r.dpp === null ? dash() : r.dpp.toFixed(1)),
     cell(h('input', { class: `num price-input${e.price ? ' custom' : ''}${tooLow ? ' too-low' : ''}`, type: 'number', min: 1, 'data-field': 'price',
-      value: e.price ?? '', placeholder: defaultPrice(r.lowestSell) ?? '', title: tooLow ? underpricedText(r) : 'Empty = lowest online − undercut' })),
+      value: e.price ?? '', placeholder: defaultPrice(r.lowestOther) ?? '', title: tooLow ? underpricedText(r) : 'Empty = cheapest other online seller − undercut' })),
     cell(h('input', { class: `num${e.listQty ? ' custom' : ''}`, type: 'number', min: 1, max: r.qty, 'data-field': 'listQty',
       value: e.listQty ?? '', placeholder: r.qty, title: `Empty = all ${r.qty}` })),
     h('td', null, listingCell(r)),
@@ -676,6 +798,8 @@ function render() {
     stat('Not listed yet', unlisted.length),
     rankNeeded > 0 && stat('Rank needed', rankNeeded, { class: 'bad', title: "Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing" }));
   $('#listAllBtn').textContent = listable ? `List all unlisted (${listable})` : 'List all unlisted';
+  const repriceable = repriceTargets(listed).changes.length;
+  $('#repriceBtn').textContent = repriceable ? `Reprice listings (${repriceable})` : 'Reprice listings';
 
   const gone = state.inventory.filter((e) => e.gone).length;
   $('#goneBanner').hidden = gone === 0;
@@ -808,11 +932,14 @@ function wireEvents() {
 
   $('#refreshBtn').addEventListener('click', refreshAll);
   $('#listAllBtn').addEventListener('click', listAllUnlisted);
+  $('#repriceBtn').addEventListener('click', repriceListings);
+  $('#hideAllBtn').addEventListener('click', () => setAllVisible(false));
+  $('#showAllBtn').addEventListener('click', () => setAllVisible(true));
 
   $('#undercut').value = storageGet('undercut', '0');
   $('#undercut').addEventListener('input', () => { storageSet('undercut', $('#undercut').value); render(); });
 
-  for (const id of ['#fCategory', '#fText', '#fMin']) $(id).addEventListener('input', render);
+  for (const id of ['#fCategory', '#fText', '#fMin', '#fDpp']) $(id).addEventListener('input', render);
 
   // Two foldable item tables with the same columns; remember which ones you folded.
   for (const section of document.querySelectorAll('.item-section')) {
@@ -855,6 +982,8 @@ function wireEvents() {
       if (action === 'update') updateEntry(entry);
       if (action === 'unlist') unlistEntry(entry);
       if (action === 'sold') soldEntry(entry);
+      if (action === 'baro') baroEntry(entry);
+      if (action === 'toggle-visible') toggleVisible(entry);
       if (action === 'gone-sold') soldEntry(entry, Math.min(entry.gone.quantity, entry.qty));
       if (action === 'gone-keep') { entry.gone = null; saveInventory(); render(); }
       if (action === 'remove') {

@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render */
+/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate */
 // TEST BUILD ONLY: drives app.html from inside the add-on (WebDriver can't script extension pages)
 // and reports results to the mock server. The runner sets/clears the warframe.market cookie when asked.
 (async () => {
@@ -22,7 +22,8 @@
   const click = (sel) => document.querySelector(sel).click();
   let confirmAnswer = true, lastConfirm = '';
   window.confirm = (msg) => { lastConfirm = msg; return confirmAnswer; };
-  window.prompt = () => '1';
+  let promptAnswer = '1';
+  window.prompt = () => promptAnswer;
   async function capture(name) {
     try { await post('/_shot', { name, data: await browser.tabs.captureVisibleTab() }); } catch (e) { await report('screenshot ' + name, false, e.message); }
   }
@@ -246,6 +247,74 @@
     await until(() => state.inventory.filter((e) => e.slug === 'axi_a1_relic').length === 2, 10000, 'relic rows');
     await report('Radiant and Intact relics are separate rows', ['intact', 'radiant'].every((s) => state.inventory.some((e) => e.slug === 'axi_a1_relic' && e.subtype === s)),
       state.inventory.filter((e) => e.slug === 'axi_a1_relic').map((e) => `${e.subtype}×${e.qty}`).join(' '));
+
+    // Pricing ignores your own listing: you're one of the online sellers whenever you're online
+    const ak = () => state.inventory.find((e) => e.slug === 'akstiletto_prime_blueprint');
+    const akPrice = state.prices.get(rowKey(ak()));
+    state.prices.set(rowKey(ak()), { ...akPrice, lowestSell: 5, sellOrders: [{ platinum: 5, user: 'mocktenno' }, { platinum: 9, user: 'someone' }] });
+    const own = buildRow(ak());
+    state.prices.set(rowKey(ak()), akPrice);
+    await report('your own listing is left out of the price to beat', own.lowestOther === 9 && own.sellAt === 9 - Number(document.getElementById('undercut').value || 0), `lowest other ${own.lowestOther}, sell at ${own.sellAt}`);
+
+    // Reprice: a listing far above the market moves to the default price; your own "Sell at" price is kept
+    const akOrder = () => state.listings.get('akstiletto_prime_blueprint')?.[0];
+    await Backend.updateOrder(akOrder().id, { platinum: 999 });
+    await loadListings(true);
+    await repriceListings();
+    await until(() => akOrder() && akOrder().platinum !== 999, 15000, 'reprice');
+    const akTarget = buildRow(ak()).sellAt;
+    await report('reprice moves listings to the default price and keeps your own prices', akOrder().platinum === akTarget
+      && /Akstiletto Prime Blueprint: 999p →/.test(lastConfirm) && /Kept your own "Sell at" price.*Soma Prime Barrel/s.test(lastConfirm),
+      `now ${akOrder().platinum}p, target ${akTarget}p | ${lastConfirm.slice(0, 250)}`);
+
+    // Hide one listing, then show all
+    document.querySelector('#tableListed tr[data-key^="akstiletto_prime_blueprint|"] [data-action=toggle-visible]').click();
+    await until(() => akOrder()?.visible === false, 15000, 'hide');
+    const hiddenOnSite = (await mockJson('/_orders')).find((o) => o.id === akOrder().id)?.visible === false;
+    await report('Hide keeps the listing but hides it', hiddenOnSite && document.querySelector('#tableListed tr[data-key^="akstiletto_prime_blueprint|"] [data-action=toggle-visible]').textContent === 'Show');
+    click('#showAllBtn');
+    await until(() => [...state.listings.values()].flat().every((o) => o.visible !== false), 15000, 'show all');
+    await report('Show all makes every listing visible', (await mockJson('/_orders')).every((o) => o.visible !== false));
+
+    // Baro: an unlisted part (1 of 3), then a listed one entirely, which removes its listing
+    const redeemer = state.inventory.find((e) => e.slug === 'redeemer_prime_blade');
+    const redeemerQty = redeemer.qty;
+    document.querySelector('tr[data-key^="redeemer_prime_blade|"] [data-action=baro]').click();
+    await until(() => state.sales.at(-1)?.slug === 'redeemer_prime_blade', 10000, 'baro');
+    const baroSale = state.sales.at(-1);
+    await report('Baro removes the items and records ducats', redeemer.qty === redeemerQty - 1 && baroSale.platinum === null
+      && baroSale.ducats === state.bySlug.get('redeemer_prime_blade').ducats && /ducats/.test(document.getElementById('salesSummary').textContent),
+      `${redeemer.qty} left, sale ${JSON.stringify(baroSale)}, ${document.getElementById('salesSummary').textContent}`);
+    const somaEntry = state.inventory.find((e) => e.slug === 'soma_prime_barrel');
+    promptAnswer = String(somaEntry.qty);
+    document.querySelector('#tableListed tr[data-key^="soma_prime_barrel|"] [data-action=baro]').click();
+    await until(() => !state.inventory.some((e) => e.slug === 'soma_prime_barrel'), 15000, 'baro listed');
+    promptAnswer = '1';
+    await report('Baro on a listed item removes its listing', !(await mockJson('/_orders')).some((o) => o.itemId === state.bySlug.get('soma_prime_barrel').id));
+
+    // Screenshots taken at different times: the newest count seen wins, and a tile without a visible count
+    // (none shown, or cut off) keeps the earlier one. Made-up readings, so this doesn't depend on OCR.
+    const det = (slug, qty, counted) => ({ match: { item: state.bySlug.get(slug), score: 1, ambiguous: false, subtype: null }, qty,
+      countBox: counted ? { x0: 0, y0: 0, x1: 1, y1: 1 } : null, text: slug, norm: slug, segs: [slug] });
+    const shotsOf = (...list) => list.map(([time, dets], i) => ({ id: 900 + i, name: `t${time}.png`, time, status: 'done', detections: dets }));
+    const scanRow = (slug) => scan.rows.find((r) => r.item?.slug === slug);
+    click('#scanClear');
+    scan.shots = shotsOf([2000, [det('hornet_strike', 2, true), det('vitality', 1, false)]], [1000, [det('hornet_strike', 3, true), det('vitality', 2, true)]]);
+    aggregate();
+    await report('newest visible count wins; no visible count keeps the earlier one', scanRow('hornet_strike').qty === 2 && scanRow('vitality').qty === 2,
+      scan.rows.map((r) => `${r.item.slug}×${r.qty}${r.qtySeen ? '' : '?'}`).join(' '));
+    const vitality = () => state.inventory.find((e) => e.slug === 'vitality');
+    vitality().qty = 7;
+    document.getElementById('scanMode').value = 'set';
+    scan.shots = shotsOf([3000, [det('vitality', 1, false)]]);
+    aggregate();
+    click('#scanAdd');
+    const keptQty = vitality().qty;
+    scan.shots = shotsOf([4000, [det('vitality', 4, true)]]);
+    aggregate();
+    click('#scanAdd');
+    await report('re-scan keeps your quantity when no count is visible, and updates it when one is', keptQty === 7 && vitality().qty === 4, `${keptQty} then ${vitality().qty}`);
+    click('#scanClear');
 
     // Logging out on the website is noticed
     await phase('need-logout');

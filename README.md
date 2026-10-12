@@ -3,11 +3,14 @@
 A Firefox / LibreWolf add-on for selling Warframe items on [warframe.market](https://warframe.market).
 
 - **Scan your inventory from screenshots.** Item names, stack counts and relic refinements are read in your browser,
-  with the game in English, Ukrainian, Spanish or Chinese. Overlapping screenshots are counted once.
+  with the game in English, Ukrainian, Spanish or Chinese. Overlapping screenshots are counted once; when counts
+  differ, the newest screenshot wins, and a tile without a visible count keeps the quantity you already have.
 - **See what everything is worth right now:** cheapest online seller, median, best buy offer, ducats, and which
   complete prime sets you own.
 - **List, update, unlist and mark items sold** on warframe.market in one click, using the login you already have
   on the site (Steam, Google, Discord or password).
+- **Keep listings competitive:** one click moves them to the cheapest other online seller minus your undercut.
+  Hide listings without deleting them, and record parts traded to Baro Ki'Teer for ducats.
 - **Sales made on the website are picked up automatically**, with a notification.
 - Safety checks: mods and arcanes can't be listed until you've set their rank, prices are refreshed before listing,
   and a price far below what others ask needs confirming.
