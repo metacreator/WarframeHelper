@@ -165,6 +165,14 @@ label.check { gap: 8px; color: var(--text); cursor: pointer; }
 .account.connected .status-dot { background: var(--good); box-shadow: 0 0 8px var(--good); }
 .account.connected { padding-right: 12px; }
 .page-lang { gap: 4px; }
+/* Language pickers with flags */
+.flag { width: 20px; height: 14px; flex: none; border-radius: 3px; object-fit: cover; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18); }
+.chip.picker { color: var(--text); gap: 8px; padding: 6px 12px 6px 10px; }
+.chip.picker::after { content: ""; width: 12px; height: 12px; background: var(--chevron) center / 12px no-repeat; transform: rotate(90deg); opacity: 0.8; }
+.picker-label { display: inline-flex; align-items: center; gap: 8px; }
+.picker-list { gap: 2px; padding: 6px; min-width: 190px; }
+.picker-list .menu-item { display: flex; align-items: center; gap: 10px; }
+.menu-item.active { background: var(--accent-soft); color: var(--accent); }
 #platform, #pageLang { padding: 6px 8px; }
 
 /* ---------- banners, status toast, dialog ---------- */
@@ -249,13 +257,30 @@ td.ocr { max-width: 130px; overflow: hidden; text-overflow: ellipsis; font-size:
 .listbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .empty { color: var(--muted); text-align: center; padding: 26px; margin: 0; }
 
+/* ---------- things that fold: a round arrow button that turns when open, and a hover highlight ---------- */
+:root { --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6 3.5 10.5 8 6 12.5' fill='none' stroke='%2395a1b7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); --chevron-hover: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6 3.5 10.5 8 6 12.5' fill='none' stroke='%23e3bc66' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.fold-arrow, .item-section > summary::before, details.fold > summary::after {
+  content: ""; flex: none; display: inline-block; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--panel-3) var(--chevron) center / 14px no-repeat; border: 1px solid var(--border);
+  transition: transform 0.2s ease, background-color 0.15s, border-color 0.15s;
+}
+.count-pill, .item-section .count, tr.group-head .count {
+  display: inline-block; padding: 1px 10px; border-radius: 999px; background: var(--panel-3);
+  color: var(--muted); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;
+}
+summary:focus-visible, tr.group-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .item-section { margin-top: 16px; }
-.item-section > summary { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; list-style: none; cursor: pointer; }
+.item-section > summary {
+  display: flex; align-items: center; gap: 12px; padding: 9px 14px; list-style: none; cursor: pointer; user-select: none;
+  border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); transition: background 0.15s, border-color 0.15s;
+}
 .item-section > summary::-webkit-details-marker { display: none; }
-.item-section > summary::before { content: "▸"; color: var(--muted); width: 12px; transition: transform 0.15s; }
+.item-section > summary:hover { background: var(--panel-3); border-color: rgba(227, 188, 102, 0.35); }
+.item-section > summary:hover::before { background-image: var(--chevron-hover); border-color: rgba(227, 188, 102, 0.5); background-color: var(--accent-soft); }
+.item-section[open] > summary { margin-bottom: 8px; }
 .item-section[open] > summary::before { transform: rotate(90deg); }
 .item-section h3 { display: inline; margin: 0; font-size: 15px; font-weight: 600; }
-.item-section .count { color: var(--muted); font-size: 13px; }
 .listed-bar { margin: 4px 0 10px; }
 
 /* ---------- tables ---------- */
@@ -304,12 +329,17 @@ table.items td select { max-width: 100%; }
 table.items .item a { overflow: hidden; text-overflow: ellipsis; color: var(--text); }
 table.items .item a:hover { color: var(--link); }
 
-tr.group-head td { cursor: pointer; padding: 14px 10px 8px; border-bottom: 1px solid var(--border); }
-tr.group-head:hover td { background: transparent; }
-tr.group-head b { font-size: 13px; letter-spacing: 0.03em; }
-tr.group-head .count { color: var(--muted); font-size: 12px; margin-left: 8px; font-weight: 400; }
-tr.group-head .arrow::before { content: "▸"; color: var(--muted); display: inline-block; width: 14px; transform: rotate(90deg); transition: transform 0.15s; }
-tbody.group.folded tr.group-head .arrow::before { transform: none; }
+/* Type groups: a shaded band with a gold edge; the whole band folds the group. */
+tr.group-head { cursor: pointer; user-select: none; }
+tr.group-head td { padding: 9px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid var(--border); box-shadow: inset 3px 0 0 rgba(227, 188, 102, 0.7); transition: background 0.15s; }
+tr.group-head:hover td { background: rgba(227, 188, 102, 0.08); }
+tr.group-head td > * { vertical-align: middle; }
+tr.group-head b { font-size: 13.5px; letter-spacing: 0.02em; margin-right: 8px; }
+tr.group-head .arrow { width: 22px; height: 22px; background-size: 12px; margin-right: 10px; transform: rotate(90deg); }
+tr.group-head:hover .arrow { background-image: var(--chevron-hover); border-color: rgba(227, 188, 102, 0.5); background-color: var(--accent-soft); }
+tbody.group.folded tr.group-head .arrow { transform: none; }
+tbody.group.folded tr.group-head td { box-shadow: inset 3px 0 0 var(--border-strong); }
+tbody.group + tbody.group tr.group-head td { border-top: 6px solid transparent; background-clip: padding-box; }
 tbody.group.folded tr:not(.group-head) { display: none; }
 
 .actions { display: flex; align-items: center; gap: 6px; }
@@ -327,8 +357,11 @@ input.needs-rank::placeholder { color: var(--bad); opacity: 1; font-weight: 600;
 input.price-input.too-low { border-color: var(--bad); color: var(--bad); }
 
 /* ---------- folding extra cards ---------- */
-details.fold > summary { display: flex; align-items: baseline; gap: 10px; list-style: none; cursor: pointer; }
+details.fold { transition: border-color 0.15s; }
+details.fold > summary { display: flex; align-items: center; gap: 10px; list-style: none; cursor: pointer; user-select: none; }
 details.fold > summary::-webkit-details-marker { display: none; }
-details.fold > summary::after { content: "▸"; margin-left: auto; color: var(--muted); transition: transform 0.15s; }
+details.fold > summary::after { margin-left: auto; }
+details.fold:has(> summary:hover) { border-color: rgba(227, 188, 102, 0.35); }
+details.fold > summary:hover::after { background-image: var(--chevron-hover); border-color: rgba(227, 188, 102, 0.5); background-color: var(--accent-soft); }
 details.fold[open] > summary::after { transform: rotate(90deg); }
 details.fold[open] > summary { margin-bottom: 12px; }

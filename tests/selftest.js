@@ -38,6 +38,10 @@
     await report('host permissions granted at install', true);
     await report('items loaded in add-on', state.items.length > 3000, state.items.length);
     await sleep(600); await capture('welcome');
+    const headerPicker = document.querySelector('.page-lang + details, .page-lang details') ?? document.getElementById('pageLang').parentElement.querySelector('details');
+    headerPicker.open = true; await sleep(300); await capture('language-picker'); headerPicker.open = false;
+    await report('language pickers show flags', document.querySelectorAll('.picker-list img.flag').length === 10
+      && headerPicker.querySelector('summary img.flag').src.endsWith('/gb.svg'), [...document.querySelectorAll('.picker-label')].map((x) => x.textContent).join(' | '));
     await report('not connected before login', !state.auth.connected, state.auth.reason);
 
     await phase('need-cookie');
@@ -383,7 +387,8 @@
       document.querySelector('#scanCard h2').textContent === 'Сканування знімків екрана' && headerCells[0] === 'Предмет'
       && /Виставити все невиставлене/.test(document.getElementById('listAllBtn').textContent)
       && document.querySelector('#tableListed [data-action=unlist]')?.textContent === 'Зняти'
-      && document.querySelector('label #fMin') && document.querySelector('label #scanLang') && document.documentElement.lang === 'uk',
+      && document.querySelector('label #fMin') && document.querySelector('label #scanLang') && document.documentElement.lang === 'uk'
+      && pageLang.parentElement.querySelector('summary img.flag').src.endsWith('/ua.svg'),
       `${document.querySelector('#scanCard h2').textContent} | ${headerCells.slice(0, 4).join(', ')} | ${document.querySelector('#tableListed .item a')?.textContent}`);
     window.scrollTo(0, 0); await sleep(300); await capture('ukrainian-top');
     document.getElementById('listedSection').scrollIntoView(); await sleep(300); await capture('ukrainian-table');

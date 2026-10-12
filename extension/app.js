@@ -967,8 +967,8 @@ function renderGroups(table, rows) {
     const id = `${table.id}:${g.key}`;
     const value = groupRows.reduce((s, r) => s + (r.value ?? 0), 0);
     table.append(h('tbody', { class: `group${foldedGroups.has(id) ? ' folded' : ''}`, 'data-group': id },
-      h('tr', { class: 'group-head', 'data-action': 'toggle-group' }, h('td', { colspan: COLUMNS.filter(columnShown).length }, // hidden columns must not count
-        h('span', { class: 'arrow' }),
+      h('tr', { class: 'group-head', 'data-action': 'toggle-group', tabindex: 0, role: 'button', 'aria-expanded': String(!foldedGroups.has(id)) }, h('td', { colspan: COLUMNS.filter(columnShown).length }, // hidden columns must not count
+        h('span', { class: 'arrow fold-arrow' }),
         h('b', null, t(g.label)),
         h('span', { class: 'count' }, `${t('{n} items', { n: groupRows.length })} · ${value.toLocaleString()}p`))),
       groupRows.map(rowEl)));
@@ -1166,6 +1166,35 @@ async function changePageLang(lang) {
 
 // ---------- events ----------
 
+// ---------- language pickers with flags (a <select> can't show pictures) ----------
+
+const FLAGS = { en: 'gb', uk: 'ua', es: 'es', 'zh-hans': 'cn', 'zh-hant': 'tw' };
+const flag = (code) => h('img', { class: 'flag', src: `icons/flags/${FLAGS[code]}.svg`, alt: '' });
+
+// Shows a flag menu in place of a language <select>, which stays (hidden) and keeps holding the value.
+// It goes after the select's translated label, as translating a label rebuilds what's inside it.
+function flagPicker(select) {
+  const label = h('span', { class: 'picker-label' });
+  const list = h('div', { class: 'menu-list picker-list' });
+  const details = h('details', { class: 'menu' }, h('summary', { class: 'chip picker' }, label), list);
+  const sync = () => {
+    fill(label, flag(select.value), select.selectedOptions[0]?.textContent ?? '');
+    fill(list, [...select.options].map((o) => h('button', { type: 'button', class: `menu-item${o.value === select.value ? ' active' : ''}`, 'data-value': o.value },
+      flag(o.value), o.textContent)));
+  };
+  list.addEventListener('click', (ev) => {
+    const value = ev.target.closest('[data-value]')?.dataset.value;
+    if (!value || value === select.value) return;
+    select.value = value;
+    select.dispatchEvent(new Event('change'));
+  });
+  select.addEventListener('change', sync);
+  select.hidden = true;
+  (select.closest('label[data-i18n]') ?? select).after(details);
+  select.syncPicker = sync;
+  sync();
+}
+
 // Category filter as buttons (the select behind them holds the value).
 function renderCategoryChips() {
   const current = $('#fCategory').value;
@@ -1298,6 +1327,11 @@ function wireEvents() {
       if (foldedGroups.has(id)) foldedGroups.delete(id); else foldedGroups.add(id);
       storageSet('foldedGroups', JSON.stringify([...foldedGroups]));
       head.closest('tbody').classList.toggle('folded', foldedGroups.has(id));
+      head.setAttribute('aria-expanded', String(!foldedGroups.has(id)));
+    });
+    // Group rows fold from the keyboard too (Enter or Space), like the sections.
+    table.addEventListener('keydown', (ev) => {
+      if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('tr.group-head')) { ev.preventDefault(); ev.target.click(); }
     });
     table.addEventListener('change', (ev) => {
       const field = ev.target.dataset.field;
@@ -1367,6 +1401,7 @@ function wireEvents() {
   langSelect.append(...Object.entries(PAGE_LANGS).map(([code, label]) => h('option', { value: code }, label)));
   langSelect.value = pageLangCode();
   langSelect.addEventListener('change', () => changePageLang(langSelect.value));
+  flagPicker(langSelect);
 
   $('#exportBtn').addEventListener('click', exportBackup);
   $('#importBtn').addEventListener('click', () => $('#importFile').click());
@@ -1420,6 +1455,7 @@ async function init() {
     if (state.settings.pageLang && state.settings.pageLang !== pageLangCode()) {
       document.documentElement.dataset.lang = setPageLang(state.settings.pageLang);
       $('#pageLang').value = pageLangCode();
+      $('#pageLang').syncPicker();
       renderTexts();
     } else if (!state.settings.pageLang) {
       await Backend.updateSettings({ pageLang: pageLangCode() }); // so notifications use it too

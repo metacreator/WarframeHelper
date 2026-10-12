@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet, t, guessLanguage, itemName */
+/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet, t, guessLanguage, itemName, flagPicker */
 // Screenshot scanner: reads Warframe inventory screenshots with Tesseract.js (OCR, runs in the browser),
 // matches the text on each tile to a warframe.market item, and merges overlapping screenshots.
 //
@@ -918,6 +918,7 @@ function wireScan() {
   langSelect.append(...Object.entries(GAME_LANGS).map(([code, l]) => h('option', { value: code }, l.label)));
   setLanguage(storageGet('scanLang', guessLanguage()));
   langSelect.value = scan.lang;
+  flagPicker(langSelect);
   langSelect.addEventListener('change', () => {
     setLanguage(langSelect.value);
     storageSet('scanLang', scan.lang);
