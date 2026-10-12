@@ -1,88 +1,37 @@
-# Warframe Help
+# Warframe Help: Tenno Trade Helper
 
-> **The browser add-on in [`extension/`](extension/README.md) (Tenno Trade Helper) replaces this local app** for everyday and public use:
-> no Node.js, no server, and it uses your warframe.market login automatically. The local app below still works.
+A Firefox / LibreWolf add-on for selling Warframe items on [warframe.market](https://warframe.market).
 
-A local tool for selling your Warframe items on [warframe.market](https://warframe.market).
-Scan screenshots of your inventory, see what each item sells for right now, list items on your profile
-in one click, and keep the list in step as things sell.
+- **Scan your inventory from screenshots.** Item names, stack counts and relic refinements are read in your browser,
+  with the game in English, Ukrainian, Spanish or Chinese. Overlapping screenshots are counted once.
+- **See what everything is worth right now:** cheapest online seller, median, best buy offer, ducats, and which
+  complete prime sets you own.
+- **List, update, unlist and mark items sold** on warframe.market in one click, using the login you already have
+  on the site (Steam, Google, Discord or password).
+- **Sales made on the website are picked up automatically**, with a notification.
+- Safety checks: mods and arcanes can't be listed until you've set their rank, prices are refreshed before listing,
+  and a price far below what others ask needs confirming.
 
-## Run it
+Everything runs in the browser: there is no server, and nothing is sent anywhere except to warframe.market.
 
-Requires Node.js 18 or newer. There is nothing to install.
+## Where things are
 
-```
-node server.js
-```
-
-Then open http://localhost:3000. On Windows you can double-click `start.bat` instead.
-
-## Configure
-
-Edit `config.json`:
-
-| Key | Meaning |
+| Path | What |
 | --- | --- |
-| `username` | Your warframe.market profile name, used to show your listings when you're not connected |
-| `platform` | `pc`, `ps4`, `xbox` or `switch` |
-| `port` | Local port. Default 3000. |
-| `priceTtlMinutes` | How old a cached price can be before it is fetched again (default 30) |
+| [`extension/`](extension/README.md) | The add-on: how to try it, publish it, and how it works |
+| [`tests/`](tests/README.md) | End-to-end tests in Firefox against a fake warframe.market (`npm test`) |
+| [`PRIVACY.md`](PRIVACY.md) | Privacy policy for the add-on store |
 
-## Adding your items
+## Commands
 
-- **Scan screenshots**: open your in-game Inventory or Mods screen, take screenshots while scrolling, and drop them
-  on the page (or paste with Ctrl+V). Text recognition runs in your browser with Tesseract.js. Each tile's name is matched
-  to a market item and its count is read. Overlapping screenshots are fine. Warframe stacks identical items into one tile,
-  so an item seen in several screenshots is counted once, using the highest count seen. Review the matches,
-  fix any mistakes, then add them. "Set quantities" mode lets you re-scan later without doubling counts.
-  If names are missed, lower **Text brightness**. If background art turns into junk text, raise it.
-  Tick "show what the scanner sees" to check.
-- **By hand**: type a name in the box above the table (it autocompletes) and press Add.
+```
+npm install      # test and packaging tools
+npm test         # run the add-on in headless Firefox and check the whole flow
+npm run lint     # Mozilla's add-on checker
+npm run build    # package for addons.mozilla.org (dist/)
+```
 
-Your list is saved to `data/inventory.json`.
+## Data from the old local app
 
-## Listing and selling
-
-Click **Connect warframe.market** at the top. There are two ways in:
-
-- **Steam / Google / Discord login** (no password): while logged in on warframe.market in your browser, press F12,
-  open Application → Cookies → `https://warframe.market`, copy the value of the `JWT` cookie and paste it.
-  The app checks it with warframe.market before saving it.
-- **Password**: sign in with email and password. The password goes to warframe.market and is not saved.
-
-Either way, only the session token is kept, in `data/auth.json`. **Disconnect** deletes it. Don't share that token:
-it works like a logged-in session.
-
-- **Sell at**: the price you list for. Leave it empty to use the default: the lowest online price minus the
-  undercut you set above the table. Type a number to use your own price (the box turns gold).
-- **List** creates a sell order for the row's quantity. **List all unlisted** lists every row shown that isn't listed yet,
-  after asking you to confirm.
-- **Update** appears when your listing's price or quantity differs from the row. **Unlist** deletes the order.
-- **Sold** removes the sold quantity from your list. If the item is listed, it also closes the order on warframe.market,
-  which records the trade there.
-- **Sales made on the website** are picked up automatically, every 3 minutes and on Refresh. If one of your orders'
-  quantity went down, the difference is removed from your list. If an order disappeared, the row is flagged
-  "Listing gone. Sold?" so you can confirm, since a deleted order looks the same as a fully sold one.
-- Every sale is kept in **Sales history** (`data/sales.json`).
-
-## What the columns mean
-
-- **Lowest sell / Median**: the cheapest, and the median of the 5 cheapest, sellers who are *online right now*.
-  These are the prices you're competing with.
-- **Best buy**: the highest online buy order. You can sell at this price immediately.
-- **D/P**: ducats per platinum. A high value means the item is worth more as ducats for Baro Ki'Teer than as platinum.
-- **Listing**: your current order. It's red if you're priced above the cheapest online seller.
-
-## Caching
-
-- Prices are cached in `data/cache/prices.json`. When you open the page, cached prices show instantly. Only prices older
-  than `priceTtlMinutes` are fetched again, in the background. Faded prices are stale. Hover a price to see its age.
-- **Refresh prices** re-checks everything, but prices fetched within the cache time are still reused unless you tick
-  **ignore cache**.
-- The item database is cached for a day and set definitions are cached permanently.
-- Requests are throttled to stay under warframe.market's limit of 3 requests per second.
-
-## Testing
-
-See [tests/README.md](tests/README.md): `npm install` then `npm test` runs the add-on end to end in Firefox against a fake warframe.market.
-For the local app, `WFM_API_URL` overrides the warframe.market address.
+Earlier versions were a local Node app that kept its data in `data/`. To move it into the add-on, open
+**Backup → Load backup…** in the add-on and pick `data/inventory.json`, then `data/sales.json`.

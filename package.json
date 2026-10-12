@@ -1,11 +1,9 @@
 {
   "name": "warframe-help",
   "version": "1.0.0",
-  "description": "Tenno Trade Helper: Firefox add-on for selling Warframe items on warframe.market (plus the older local app)",
+  "description": "Tenno Trade Helper: Firefox add-on for selling Warframe items on warframe.market",
   "private": true,
-  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
     "test": "node tests/run-firefox.js",
     "lint": "web-ext lint",
     "build": "web-ext build --overwrite-dest"
