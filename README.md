@@ -1,5 +1,8 @@
 # Warframe Help
 
+> **The browser add-on in [`extension/`](extension/README.md) (Tenno Trade Helper) replaces this local app** for everyday and public use:
+> no Node.js, no server, and it uses your warframe.market login automatically. The local app below still works.
+
 A local tool for selling your Warframe items on [warframe.market](https://warframe.market).
 Scan screenshots of your inventory, see what each item sells for right now, list items on your profile
 in one click, and keep the list in step as things sell.

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tenno Trade Helper</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Tenno Trade Helper</h1>
+      <p class="sub">What's worth selling on <a id="profileLink" href="https://warframe.market" target="_blank" rel="noopener">warframe.market</a></p>
+    </div>
+    <div class="header-right">
+      <div id="account" class="account">
+        <span id="accountText" class="hint">Checking your warframe.market login…</span>
+        <button id="accountBtn" type="button" class="secondary" hidden>Log in on warframe.market</button>
+        <select id="platform" title="Your platform on warframe.market">
+          <option value="pc">PC</option>
+          <option value="ps4">PlayStation</option>
+          <option value="xbox">Xbox</option>
+          <option value="switch">Switch</option>
+          <option value="mobile">Mobile</option>
+        </select>
+      </div>
+      <div id="status" class="status">Loading item database…</div>
+    </div>
+  </header>
+
+  <div id="accessBanner" class="banner access" hidden>
+    Tenno Trade Helper needs permission to talk to warframe.market to load prices and use your login there.
+    <button id="accessBtn" type="button">Allow access</button>
+  </div>
+
+  <main>
+    <section class="card" id="scanCard">
+      <div class="row spread">
+        <h2>Scan screenshots</h2>
+        <span id="scanStatus" class="hint"></span>
+      </div>
+      <p class="hint">Open your in-game Inventory (or the Mods screen), take screenshots while scrolling, and drop them here.
+        Overlapping screenshots are fine: an item seen in several screenshots is only counted once.
+        Tip: <kbd>Win</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> then <kbd>Ctrl</kbd>+<kbd>V</kbd> on this page.</p>
+
+      <div id="dropZone" class="dropzone">
+        Drop screenshots here, click to choose files, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>
+        <input id="scanFiles" type="file" accept="image/*" multiple hidden>
+      </div>
+
+      <div class="row">
+        <label>Looking for
+          <select id="scanCategory">
+            <option value="">Any tradable item</option>
+            <option value="Prime Part">Prime parts</option>
+            <option value="Mod">Mods</option>
+            <option value="Arcane">Arcanes</option>
+            <option value="Relic">Relics</option>
+          </select>
+        </label>
+        <label title="How bright a pixel must be to count as text. Lower it if names are missed, raise it if background art turns into junk text.">
+          Text brightness <input id="scanThreshold" type="range" min="80" max="230" value="150"> <span id="scanThresholdVal">150</span>
+        </label>
+        <button id="scanRescan" type="button" class="secondary">Re-scan</button>
+        <button id="scanClear" type="button" class="danger">Clear screenshots</button>
+      </div>
+
+      <p id="scanEmpty" class="hint">No screenshots yet.</p>
+
+      <div id="scanResults" hidden>
+        <div id="shots" class="shots"></div>
+
+        <div class="scan-grid">
+          <div>
+            <div class="row spread">
+              <span id="scanSummary" class="hint"></span>
+              <label><input id="scanShowUnknown" type="checkbox"> show unrecognised text</label>
+            </div>
+            <div class="table-wrap scan-table-wrap">
+              <table id="scanTable">
+                <thead><tr><th></th><th>Item</th><th class="r">Qty</th><th>Seen in</th><th>Read as</th><th class="r">Match</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="row">
+              <select id="scanMode" title="What to do with items that are already in your list">
+                <option value="set">Set quantities (best when re-scanning)</option>
+                <option value="add">Add to quantities</option>
+              </select>
+              <button id="scanAdd" type="button" disabled>Add selected to my items</button>
+            </div>
+          </div>
+          <div>
+            <div class="row spread">
+              <span class="hint">Green: matched name · orange: not matched · blue: count · click to enlarge</span>
+              <label><input id="scanProcessed" type="checkbox"> show what the scanner sees</label>
+            </div>
+            <canvas id="scanPreview" hidden></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row spread">
+        <h2>Your items</h2>
+        <div class="row">
+          <span id="priceAge" class="hint"></span>
+          <button id="refreshBtn" type="button" class="secondary">Refresh prices</button>
+          <label title="Ask warframe.market again even for prices fetched in the last few minutes"><input id="forceRefresh" type="checkbox"> ignore cache</label>
+        </div>
+      </div>
+
+      <form id="addForm" class="row">
+        <input id="addName" list="itemNames" placeholder="Add an item by hand, e.g. Ash Prime Systems Blueprint" autocomplete="off" required>
+        <input id="addQty" type="number" min="1" value="1" title="Quantity" class="num">
+        <input id="addRank" type="number" min="0" placeholder="rank" title="Mod/arcane rank" class="num">
+        <button type="submit" class="secondary">Add</button>
+      </form>
+      <datalist id="itemNames"></datalist>
+
+      <div class="row filters">
+        <select id="fCategory">
+          <option value="">All categories</option>
+        </select>
+        <input id="fText" placeholder="Filter by name">
+        <label>Min plat <input id="fMin" type="number" min="0" value="0" class="num"></label>
+        <label><input id="fUnlisted" type="checkbox"> Only items not listed yet</label>
+      </div>
+
+      <div class="row listbar">
+        <label title="Default listing price for items where you haven't typed your own">Default price: lowest online
+          − <input id="undercut" type="number" min="0" value="0" class="num"> p</label>
+        <button id="listAllBtn" type="button">List all unlisted</button>
+        <button id="clearBtn" type="button" class="danger">Clear list</button>
+      </div>
+
+      <div id="goneBanner" class="banner" hidden></div>
+
+      <div id="summary" class="summary"></div>
+
+      <div class="table-wrap">
+        <table id="table">
+          <thead>
+            <tr>
+              <th data-sort="name">Item</th>
+              <th data-sort="category">Type</th>
+              <th data-sort="qty" class="r">Qty</th>
+              <th class="r">Rank / Ref.</th>
+              <th data-sort="lowestSell" class="r" title="Cheapest seller who is online right now">Lowest sell</th>
+              <th data-sort="medianSell" class="r" title="Median of the 5 cheapest online sellers">Median</th>
+              <th data-sort="bestBuy" class="r" title="Highest buy order from an online player — instant sale">Best buy</th>
+              <th data-sort="value" class="r" title="Lowest sell × quantity">Value</th>
+              <th data-sort="ducats" class="r">Ducats</th>
+              <th data-sort="dpp" class="r" title="Ducats per platinum: high = better to sell to Baro Ki'Teer">D/P</th>
+              <th data-sort="sellAt" class="r" title="Your listing price. Leave empty to use the default (lowest online minus undercut).">Sell at</th>
+              <th data-sort="listed">Listing</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p id="emptyMsg" class="empty">No items yet. Scan some screenshots or add items by hand.</p>
+      </div>
+    </section>
+
+    <section class="card" id="setsCard" hidden>
+      <h2>Complete prime sets</h2>
+      <p class="hint">You own every part needed for these. Compare selling the set against selling the parts separately.</p>
+      <div class="table-wrap">
+        <table id="setsTable">
+          <thead><tr><th>Set</th><th class="r">Sets</th><th class="r">Set price</th><th class="r">Parts total</th><th class="r">Better</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Trade chat message</h2>
+      <p class="hint">Built from the rows currently shown, using each item's "Sell at" price.</p>
+      <textarea id="tradeMsg" rows="4" readonly></textarea>
+      <div class="row"><button id="copyTrade" type="button" class="secondary">Copy</button></div>
+    </section>
+    <section class="card">
+      <details id="salesDetails">
+        <summary><h2 class="inline">Sales history</h2> <span id="salesSummary" class="hint"></span></summary>
+        <div class="table-wrap">
+          <table id="salesTable">
+            <thead><tr><th>When</th><th>Item</th><th class="r">Qty</th><th class="r">Each</th><th class="r">Total</th><th>How</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+    <section class="card">
+      <details>
+        <summary><h2 class="inline">Backup</h2> <span class="hint">your list and sales history are stored in this browser only</span></summary>
+        <p class="hint">Save a backup file, or load one: for example to move to another browser or computer.
+          Files from the old local app (<code>data/inventory.json</code>, <code>data/sales.json</code>) can be loaded too.</p>
+        <div class="row">
+          <button id="exportBtn" type="button" class="secondary">Save backup</button>
+          <button id="importBtn" type="button" class="secondary">Load backup…</button>
+          <input id="importFile" type="file" accept=".json,application/json" hidden>
+          <span id="backupResult" class="hint"></span>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <script src="lib/backend.js"></script>
+  <script src="app.js"></script>
+  <script src="scan.js"></script>
+</body>
+</html>

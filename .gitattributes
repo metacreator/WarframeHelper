@@ -1,0 +1,2 @@
+# Bundled third-party files must stay byte-identical to the official releases (add-on store reviews compare them).
+extension/vendor/** -text
