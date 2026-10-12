@@ -12,48 +12,55 @@
       <h1>Warframe Help</h1>
       <p class="sub">What's worth selling on <a id="profileLink" target="_blank" rel="noopener">warframe.market</a></p>
     </div>
-    <div id="status" class="status">Loading item database…</div>
+    <div class="header-right">
+      <div id="account" class="account">
+        <span id="accountText" class="hint">Not connected</span>
+        <button id="accountBtn" type="button" class="secondary">Connect warframe.market</button>
+      </div>
+      <div id="status" class="status">Loading item database…</div>
+    </div>
   </header>
 
-  <main>
-    <section class="card">
-      <h2>Add items</h2>
-      <form id="addForm" class="row">
-        <input id="addName" list="itemNames" placeholder="Item name, e.g. Ash Prime Systems Blueprint" autocomplete="off" required>
-        <input id="addQty" type="number" min="1" value="1" title="Quantity" class="num">
-        <input id="addRank" type="number" min="0" placeholder="rank" title="Mod/arcane rank" class="num">
-        <button type="submit">Add</button>
-      </form>
-      <datalist id="itemNames"></datalist>
+  <dialog id="loginDialog">
+    <h2>Connect warframe.market</h2>
+    <p class="hint">Needed to list, update and mark items as sold. The session is kept only on this computer,
+      in <code>data/auth.json</code>. <b>Disconnect</b> deletes it.</p>
 
-      <details>
-        <summary>Paste a list</summary>
-        <p class="hint">One item per line. Quantity as <code>x3</code> or <code>3x</code>, rank as <code>r10</code>, relic refinement as a word. Example:<br>
-          <code>Ash Prime Systems Blueprint x2</code> · <code>Primed Continuity r10</code> · <code>Axi A1 Relic radiant</code> · <code>3x Soma Prime Barrel</code></p>
-        <textarea id="pasteBox" rows="6" placeholder="Paste items here…"></textarea>
-        <div class="row">
-          <button id="pasteBtn" type="button">Add lines</button>
-          <span id="pasteResult" class="hint"></span>
-        </div>
-      </details>
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="token">I log in with Steam / Google / Discord</button>
+      <button type="button" class="tab" data-tab="password">I have a password</button>
+    </div>
 
-      <details>
-        <summary>Import a game inventory export (JSON)</summary>
-        <p class="hint">Accepts the raw Warframe inventory JSON (with <code>MiscItems</code>, <code>Recipes</code>, <code>RawUpgrades</code>, <code>Upgrades</code>) saved by an inventory export tool.
-          Items are matched to the market by their internal game path. Built gear is skipped since it can't be traded.</p>
-        <div class="row">
-          <input id="importFile" type="file" accept=".json,application/json">
-          <label><input id="importReplace" type="checkbox"> Replace current list</label>
-          <span id="importResult" class="hint"></span>
-        </div>
-      </details>
-
+    <form id="tokenForm" class="tab-panel">
+      <ol class="steps">
+        <li>Open <a href="https://warframe.market" target="_blank" rel="noopener">warframe.market</a> in your browser and make sure you're logged in.</li>
+        <li>Press <kbd>F12</kbd> to open developer tools, then go to <b>Application</b> (Chrome/Edge) or <b>Storage</b> (Firefox).</li>
+        <li>Under <b>Cookies</b>, click <code>https://warframe.market</code>.</li>
+        <li>Find the cookie named <code>JWT</code>, double-click its <b>Value</b>, and copy it.</li>
+      </ol>
+      <label class="field">Session token <input id="tokenInput" type="password" autocomplete="off" placeholder="Paste the JWT cookie value" required></label>
+      <p class="hint">This token works like a logged-in session, so don't share it. If you log out on the website it may stop working;
+        then just paste a fresh one.</p>
+      <p id="tokenError" class="bad"></p>
       <div class="row">
-        <button id="importOrdersBtn" type="button" class="secondary">Add my current market listings to the list</button>
-        <button id="clearBtn" type="button" class="danger">Clear list</button>
+        <button id="tokenSubmit" type="submit">Connect</button>
+        <button type="button" class="secondary" data-action="close-login">Cancel</button>
       </div>
-    </section>
+    </form>
 
+    <form id="loginForm" class="tab-panel" hidden>
+      <p class="hint">Your password goes straight to warframe.market and is not saved. Only the session token it returns is kept.</p>
+      <label class="field">Email <input id="loginEmail" type="email" autocomplete="username" required></label>
+      <label class="field">Password <input id="loginPassword" type="password" autocomplete="current-password" required></label>
+      <p id="loginError" class="bad"></p>
+      <div class="row">
+        <button id="loginSubmit" type="submit">Connect</button>
+        <button type="button" class="secondary" data-action="close-login">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <main>
     <section class="card" id="scanCard">
       <div class="row spread">
         <h2>Scan screenshots</h2>
@@ -125,10 +132,19 @@
       <div class="row spread">
         <h2>Your items</h2>
         <div class="row">
-          <button id="refreshBtn" type="button">Refresh prices</button>
-          <label><input id="forceRefresh" type="checkbox"> ignore cache</label>
+          <span id="priceAge" class="hint"></span>
+          <button id="refreshBtn" type="button" class="secondary">Refresh prices</button>
+          <label title="Ask warframe.market again even for prices fetched in the last few minutes"><input id="forceRefresh" type="checkbox"> ignore cache</label>
         </div>
       </div>
+
+      <form id="addForm" class="row">
+        <input id="addName" list="itemNames" placeholder="Add an item by hand, e.g. Ash Prime Systems Blueprint" autocomplete="off" required>
+        <input id="addQty" type="number" min="1" value="1" title="Quantity" class="num">
+        <input id="addRank" type="number" min="0" placeholder="rank" title="Mod/arcane rank" class="num">
+        <button type="submit" class="secondary">Add</button>
+      </form>
+      <datalist id="itemNames"></datalist>
 
       <div class="row filters">
         <select id="fCategory">
@@ -138,6 +154,15 @@
         <label>Min plat <input id="fMin" type="number" min="0" value="0" class="num"></label>
         <label><input id="fUnlisted" type="checkbox"> Only items not listed yet</label>
       </div>
+
+      <div class="row listbar">
+        <label title="Default listing price for items where you haven't typed your own">Default price: lowest online
+          − <input id="undercut" type="number" min="0" value="0" class="num"> p</label>
+        <button id="listAllBtn" type="button">List all unlisted</button>
+        <button id="clearBtn" type="button" class="danger">Clear list</button>
+      </div>
+
+      <div id="goneBanner" class="banner" hidden></div>
 
       <div id="summary" class="summary"></div>
 
@@ -155,13 +180,14 @@
               <th data-sort="value" class="r" title="Lowest sell × quantity">Value</th>
               <th data-sort="ducats" class="r">Ducats</th>
               <th data-sort="dpp" class="r" title="Ducats per platinum: high = better to sell to Baro Ki'Teer">D/P</th>
-              <th data-sort="listed" class="r">My listing</th>
+              <th data-sort="sellAt" class="r" title="Your listing price. Leave empty to use the default (lowest online minus undercut).">Sell at</th>
+              <th data-sort="listed">Listing</th>
               <th></th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
-        <p id="emptyMsg" class="empty">No items yet. Add some above.</p>
+        <p id="emptyMsg" class="empty">No items yet. Scan some screenshots or add items by hand.</p>
       </div>
     </section>
 
@@ -178,9 +204,21 @@
 
     <section class="card">
       <h2>Trade chat message</h2>
-      <p class="hint">Built from the rows currently shown, using the lowest online sell price.</p>
+      <p class="hint">Built from the rows currently shown, using each item's "Sell at" price.</p>
       <textarea id="tradeMsg" rows="4" readonly></textarea>
       <div class="row"><button id="copyTrade" type="button" class="secondary">Copy</button></div>
+    </section>
+
+    <section class="card">
+      <details id="salesDetails">
+        <summary><h2 class="inline">Sales history</h2> <span id="salesSummary" class="hint"></span></summary>
+        <div class="table-wrap">
+          <table id="salesTable">
+            <thead><tr><th>When</th><th>Item</th><th class="r">Qty</th><th class="r">Each</th><th class="r">Total</th><th>How</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
     </section>
   </main>
 

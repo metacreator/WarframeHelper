@@ -1,10 +1,12 @@
-// Warframe Help — local price checker for warframe.market
+// Warframe Help — local price checker and lister for warframe.market
 // Zero-dependency Node server: proxies the warframe.market API (which has no CORS),
-// throttles to their 3 req/s limit, caches results, and stores your inventory on disk.
+// throttles to their 3 req/s limit, caches results, stores your inventory on disk,
+// and (once you connect your account) creates, updates and closes your sell orders.
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
@@ -20,7 +22,7 @@ const config = {
   ...readJson(path.join(ROOT, 'config.json'), {}),
 };
 
-const API = 'https://api.warframe.market';
+const API = process.env.WFM_API_URL || 'https://api.warframe.market'; // override only for testing
 const ITEMS_TTL = 24 * 60 * 60 * 1000;
 const PRICE_TTL = config.priceTtlMinutes * 60 * 1000;
 const ORDERS_TTL = 60 * 1000;
@@ -37,52 +39,85 @@ function writeJson(file, value) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
 // ---------- upstream access (throttled) ----------
 
 let queue = Promise.resolve();
 let lastRequest = 0;
 const MIN_GAP_MS = 350; // stays under warframe.market's 3 requests/second
 
-function wfm(pathAndQuery) {
+// Readable messages for the error codes warframe.market returns.
+const ERROR_TEXT = {
+  'app.account.email_not_exist': 'No warframe.market account uses that email.',
+  'app.account.password_invalid': 'Wrong password.',
+  'app.user.notFound': 'warframe.market has no profile with that name. Check "username" in config.json.',
+};
+
+function describeError(body, status) {
+  const err = body?.error;
+  if (!err) return `warframe.market returned ${status}`;
+  if (typeof err === 'string') return ERROR_TEXT[err] ?? err;
+  const parts = [];
+  for (const [field, codes] of Object.entries(err)) {
+    for (const code of [].concat(codes)) parts.push(ERROR_TEXT[code] ?? `${field}: ${code}`);
+  }
+  return parts.join(' ') || `warframe.market returned ${status}`;
+}
+
+// Every request to warframe.market goes through this queue so we never exceed the rate limit.
+function upstream(method, pathAndQuery, { body, token, headers = {} } = {}) {
   const run = async () => {
     for (let attempt = 0; attempt < 4; attempt++) {
       const wait = lastRequest + MIN_GAP_MS - Date.now();
       if (wait > 0) await sleep(wait);
       lastRequest = Date.now();
       const res = await fetch(API + pathAndQuery, {
+        method,
         headers: {
           'Language': 'en',
           'Platform': config.platform,
           'Crossplay': 'true',
           'Accept': 'application/json',
           'User-Agent': 'WarframeHelp/1.0 (personal price checker)',
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+          ...headers,
         },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
       });
       if (res.status === 429 || res.status >= 500) {
         await sleep(1500 * (attempt + 1));
         continue;
       }
-      const body = await res.json().catch(() => null);
-      if (!res.ok) {
-        const err = new Error(`warframe.market ${res.status} for ${pathAndQuery}`);
-        err.status = res.status;
-        err.body = body;
-        throw err;
-      }
-      return body.data;
+      const json = res.status === 204 ? null : await res.json().catch(() => null);
+      return { status: res.status, ok: res.ok, headers: res.headers, body: json };
     }
-    throw new Error(`warframe.market kept rate-limiting ${pathAndQuery}`);
+    throw httpError(502, `warframe.market kept rate-limiting ${pathAndQuery}`);
   };
   const p = queue.then(run, run);
   queue = p.catch(() => {});
   return p;
 }
 
+async function wfm(pathAndQuery, { method = 'GET', body, authed = false } = {}) {
+  if (authed && !auth) throw httpError(401, 'Connect your warframe.market account first.');
+  const res = await upstream(method, pathAndQuery, { body, token: authed ? auth.token : undefined });
+  if (res.status === 401 && authed) {
+    setAuth(null);
+    throw httpError(401, 'Your warframe.market session expired. Connect your account again.');
+  }
+  if (!res.ok) throw httpError(res.status, describeError(res.body, res.status));
+  return res.body?.data ?? null;
+}
+
 // ---------- items ----------
 
 const ITEMS_FILE = path.join(CACHE_DIR, 'items.json');
 let itemsCache = readJson(ITEMS_FILE, null);
-let itemsByGameRef = null;
+let itemIndex = null;
 
 async function getItems(force = false) {
   if (!force && itemsCache && Date.now() - itemsCache.fetchedAt < ITEMS_TTL) return itemsCache.items;
@@ -100,17 +135,16 @@ async function getItems(force = false) {
     vaulted: i.vaulted ?? false,
   }));
   itemsCache = { fetchedAt: Date.now(), items };
-  itemsByGameRef = null;
+  itemIndex = null;
   writeJson(ITEMS_FILE, itemsCache);
   return items;
 }
 
-async function gameRefIndex() {
-  if (!itemsByGameRef) {
-    itemsByGameRef = new Map();
-    for (const it of await getItems()) if (it.gameRef) itemsByGameRef.set(it.gameRef, it);
-  }
-  return itemsByGameRef;
+async function itemBySlug(slug) {
+  if (!itemIndex) itemIndex = new Map((await getItems()).map((i) => [i.slug, i]));
+  const item = itemIndex.get(slug);
+  if (!item) throw httpError(400, `Unknown item: ${slug}`);
+  return item;
 }
 
 // ---------- prices ----------
@@ -122,12 +156,15 @@ setInterval(() => {
   if (pricesDirty) { writeJson(PRICES_FILE, prices); pricesDirty = false; }
 }, 5000).unref();
 
-async function getPrice(slug, rank, subtype, force) {
+function priceKey(slug, rank, subtype) {
   const params = new URLSearchParams();
   if (rank !== null && rank !== undefined && rank !== '') params.set('rank', rank);
   if (subtype) params.set('subtype', subtype);
-  const qs = params.toString();
-  const key = `${slug}?${qs}`;
+  return { key: `${slug}?${params}`, qs: params.toString() };
+}
+
+async function getPrice(slug, rank, subtype, force) {
+  const { key, qs } = priceKey(slug, rank, subtype);
   const cached = prices[key];
   if (!force && cached && Date.now() - cached.fetchedAt < PRICE_TTL) return cached;
 
@@ -149,13 +186,27 @@ async function getPrice(slug, rank, subtype, force) {
   return summary;
 }
 
+// Everything in the price cache regardless of age, so the page can show it instantly on load.
+function cachedPrices() {
+  return Object.entries(prices).map(([key, summary]) => {
+    const [slug, qs] = key.split('?');
+    const params = new URLSearchParams(qs);
+    return {
+      slug,
+      rank: params.has('rank') ? Number(params.get('rank')) : null,
+      subtype: params.get('subtype'),
+      ...summary,
+    };
+  });
+}
+
 // ---------- sets ----------
 
 const SETS_FILE = path.join(CACHE_DIR, 'sets.json');
 const sets = readJson(SETS_FILE, {});
 
 async function getSet(slug) {
-  if (sets[slug]) return sets[slug];
+  if (sets[slug] !== undefined) return sets[slug];
   const data = await wfm(`/v2/item/${encodeURIComponent(slug)}/set`);
   const root = data.items.find((i) => i.setRoot);
   const info = root
@@ -168,61 +219,185 @@ async function getSet(slug) {
     : null;
   // Cache under every member slug so later lookups for sibling parts are free.
   for (const i of data.items) sets[i.slug] = info;
+  sets[slug] = info;
   writeJson(SETS_FILE, sets);
   return info;
 }
 
-// ---------- user orders ----------
+// ---------- account ----------
 
-let ordersCache = null;
+const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
+let auth = readJson(AUTH_FILE, null); // { token, deviceId, user: { ingameName, slug } }
+let authVerified = false;
 
-async function getMyOrders(force) {
-  if (!force && ordersCache && Date.now() - ordersCache.fetchedAt < ORDERS_TTL) return ordersCache;
-  const orders = await wfm(`/v2/orders/user/${encodeURIComponent(config.username.toLowerCase())}`);
-  ordersCache = { fetchedAt: Date.now(), orders };
-  return ordersCache;
+function setAuth(value) {
+  auth = value;
+  authVerified = !!value;
+  if (value) writeJson(AUTH_FILE, value);
+  else fs.rmSync(AUTH_FILE, { force: true });
+  ordersCache = null;
 }
 
-// ---------- inventory ----------
+async function login(email, password) {
+  if (!email || !password) throw httpError(400, 'Enter your email and password.');
+  const deviceId = auth?.deviceId ?? `wfhelp-${crypto.randomUUID()}`;
+  const res = await upstream('POST', '/v1/auth/signin', {
+    body: { auth_type: 'header', email, password, device_id: deviceId },
+    headers: { 'Authorization': 'JWT' },
+  });
+  if (!res.ok) throw httpError(res.status === 401 ? 400 : res.status, describeError(res.body, res.status));
+  const token = (res.headers.get('authorization') ?? '').replace(/^JWT\s+/i, '');
+  if (!token) throw httpError(502, 'warframe.market did not return a session token.');
+  const u = res.body?.payload?.user ?? {};
+  // Only the session token is kept, never the password.
+  setAuth({ token, deviceId, user: { ingameName: u.ingame_name, slug: u.slug ?? u.ingame_name?.toLowerCase() } });
+  await verifyAuth();
+  return authStatus();
+}
+
+// For accounts that sign in with Steam/Google/Discord and have no password: use the session token
+// copied from the browser's warframe.market cookie. It is checked against /v2/me before being kept.
+async function loginWithToken(raw) {
+  const token = String(raw ?? '').trim().replace(/^(JWT|Bearer)\s+/i, '').replace(/^"|"$/g, '');
+  if (!token) throw httpError(400, 'Paste the token first.');
+  const res = await upstream('GET', '/v2/me', { token });
+  if (res.status === 401 || res.status === 403) {
+    throw httpError(400, 'warframe.market did not accept that token. Copy the cookie value again while logged in, or check you copied the whole value.');
+  }
+  if (!res.ok) throw httpError(res.status, describeError(res.body, res.status));
+  const me = res.body?.data ?? {};
+  setAuth({ token, deviceId: auth?.deviceId ?? `wfhelp-${crypto.randomUUID()}`, user: { ingameName: me.ingameName, slug: me.slug } });
+  return authStatus();
+}
+
+// Confirms a saved token still works and refreshes the profile name.
+async function verifyAuth() {
+  if (!auth || authVerified) return;
+  try {
+    const me = await wfm('/v2/me', { authed: true });
+    auth.user = { ingameName: me.ingameName, slug: me.slug };
+    writeJson(AUTH_FILE, auth);
+    authVerified = true;
+  } catch (err) {
+    if (err.status !== 401) throw err; // network trouble: keep the token, try again later
+  }
+}
+
+function authStatus() {
+  return auth ? { connected: true, user: auth.user } : { connected: false, user: null };
+}
+
+function profileSlug() {
+  return auth?.user?.slug ?? config.username.toLowerCase();
+}
+
+// ---------- your orders + sale detection ----------
+
+// We remember your sell orders between fetches. If one shrinks or disappears without this app
+// doing it, you probably marked it sold on the website, and the page asks or updates the list.
+const SNAPSHOT_FILE = path.join(DATA_DIR, 'orders-snapshot.json');
+let snapshot = readJson(SNAPSHOT_FILE, null); // { owner, authed, orders: { [id]: {...} } }
+let ordersCache = null;
+
+const snapOrder = (o) => ({ itemId: o.itemId, rank: o.rank ?? null, subtype: o.subtype ?? null, quantity: o.quantity, platinum: o.platinum });
+
+function saveSnapshot() { writeJson(SNAPSHOT_FILE, snapshot); }
+
+function diffSnapshot(orders) {
+  const owner = profileSlug();
+  const authed = !!auth;
+  const current = {};
+  for (const o of orders) if (o.type === 'sell') current[o.id] = snapOrder(o);
+
+  const events = [];
+  if (snapshot && snapshot.owner === owner && snapshot.authed === authed) {
+    for (const [id, old] of Object.entries(snapshot.orders)) {
+      const now = current[id];
+      if (!now) events.push({ kind: 'gone', orderId: id, ...old });
+      else if (now.quantity < old.quantity) events.push({ kind: 'sold', orderId: id, ...old, quantity: old.quantity - now.quantity });
+    }
+  }
+  snapshot = { owner, authed, orders: current };
+  saveSnapshot();
+  return events;
+}
+
+// Keeps the snapshot in step with changes this app makes, so they aren't mistaken for sales.
+function snapshotApply(id, order) {
+  if (!snapshot) return;
+  if (order && order.quantity > 0) snapshot.orders[id] = snapOrder(order);
+  else delete snapshot.orders[id];
+  saveSnapshot();
+}
+
+async function getMyOrders(force) {
+  await verifyAuth();
+  if (!force && ordersCache && Date.now() - ordersCache.fetchedAt < ORDERS_TTL) {
+    return { ...ordersCache, events: [] };
+  }
+  const orders = auth
+    ? await wfm('/v2/orders/my', { authed: true })
+    : await wfm(`/v2/orders/user/${encodeURIComponent(profileSlug())}`);
+  const events = diffSnapshot(orders);
+  ordersCache = { fetchedAt: Date.now(), orders, authed: !!auth };
+  return { ...ordersCache, events };
+}
+
+async function createOrder({ slug, platinum, quantity, rank, subtype, visible = true }) {
+  const item = await itemBySlug(slug);
+  const body = {
+    itemId: item.id,
+    type: 'sell',
+    platinum: Math.round(Number(platinum)),
+    quantity: Math.max(1, Math.round(Number(quantity) || 1)),
+    visible: !!visible,
+  };
+  if (!(body.platinum >= 1)) throw httpError(400, 'Price must be at least 1 platinum.');
+  if (item.maxRank !== null && rank !== null && rank !== undefined) body.rank = Number(rank);
+  if (item.subtypes && subtype) body.subtype = subtype;
+  const order = await wfm('/v2/order', { method: 'POST', body, authed: true });
+  snapshotApply(order.id, order);
+  ordersCache = null;
+  return order;
+}
+
+async function updateOrder(id, { platinum, quantity, visible }) {
+  const body = {};
+  if (platinum !== undefined) body.platinum = Math.round(Number(platinum));
+  if (quantity !== undefined) body.quantity = Math.max(1, Math.round(Number(quantity)));
+  if (visible !== undefined) body.visible = !!visible;
+  const order = await wfm(`/v2/order/${encodeURIComponent(id)}`, { method: 'PATCH', body, authed: true });
+  snapshotApply(id, order);
+  ordersCache = null;
+  return order;
+}
+
+async function deleteOrder(id) {
+  await wfm(`/v2/order/${encodeURIComponent(id)}`, { method: 'DELETE', authed: true });
+  snapshotApply(id, null);
+  ordersCache = null;
+  return { ok: true };
+}
+
+// "Close" is warframe.market's "mark as sold": it lowers the quantity and records the trade.
+async function closeOrder(id, quantity) {
+  const qty = Math.max(1, Math.round(Number(quantity) || 1));
+  const result = await wfm(`/v2/order/${encodeURIComponent(id)}/close`, { method: 'POST', body: { quantity: qty }, authed: true });
+  const old = snapshot?.orders[id];
+  if (old) snapshotApply(id, { ...old, quantity: old.quantity - qty });
+  ordersCache = null;
+  return result;
+}
+
+// ---------- inventory + sales history ----------
 
 const INVENTORY_FILE = path.join(DATA_DIR, 'inventory.json');
+const SALES_FILE = path.join(DATA_DIR, 'sales.json');
 
-// Turns a raw Warframe inventory export (the JSON the game client downloads,
-// as saved by tools that export it) into market items, matched by internal path.
-async function importGameInventory(json) {
-  const index = await gameRefIndex();
-  const found = new Map();
-  let scanned = 0;
-  let unmatched = 0;
-
-  const add = (item, qty, rank) => {
-    const key = `${item.slug}|${rank ?? ''}`;
-    const prev = found.get(key);
-    if (prev) prev.qty += qty;
-    else found.set(key, { slug: item.slug, qty, rank: rank ?? null });
-  };
-
-  // Only these sections hold tradable, unbuilt things. Equipped gear (LongGuns,
-  // Suits, ...) shares paths with market "sets" but can't be traded once built.
-  const SECTIONS = ['MiscItems', 'Recipes', 'RawUpgrades', 'Upgrades'];
-  const hasSections = SECTIONS.some((s) => Array.isArray(json[s]));
-  const entries = hasSections ? SECTIONS.flatMap((s) => json[s] ?? []) : (Array.isArray(json) ? json : []);
-
-  for (const e of entries) {
-    const ref = e.ItemType ?? e.uniqueName ?? e.itemType;
-    if (!ref) continue;
-    scanned++;
-    const item = index.get(ref);
-    if (!item || item.tags.includes('set')) { unmatched++; continue; }
-    let rank = null;
-    if (item.maxRank !== null) {
-      rank = 0;
-      try { rank = JSON.parse(e.UpgradeFingerprint ?? '{}').lvl ?? 0; } catch { /* unranked */ }
-    }
-    const qty = Number(e.ItemCount ?? e.count ?? 1);
-    if (qty > 0) add(item, qty, rank);
-  }
-  return { items: [...found.values()], scanned, unmatched };
+function saveInventory(inv) {
+  if (!Array.isArray(inv)) throw httpError(400, 'Inventory must be an array');
+  writeJson(INVENTORY_FILE, inv);
+  return { ok: true, count: inv.length };
 }
 
 // ---------- http ----------
@@ -234,49 +409,75 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function readBody(req, limit = 50 * 1024 * 1024) {
+function readBody(req, limit = 5 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > limit) { reject(new Error('Body too large')); req.destroy(); }
+      if (size > limit) { reject(httpError(413, 'Body too large')); req.destroy(); }
       else chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      try { resolve(text ? JSON.parse(text) : {}); } catch { reject(httpError(400, 'Invalid JSON')); }
+    });
     req.on('error', reject);
   });
 }
 
-const routes = {
-  'GET /api/config': async () => ({ username: config.username, platform: config.platform, priceTtlMinutes: config.priceTtlMinutes }),
-  'GET /api/items': async (q) => getItems(q.get('force') === '1'),
-  'GET /api/price': async (q) => getPrice(q.get('slug'), q.get('rank'), q.get('subtype'), q.get('force') === '1'),
-  'GET /api/set': async (q) => getSet(q.get('slug')),
-  'GET /api/my-orders': async (q) => getMyOrders(q.get('force') === '1'),
-  'GET /api/inventory': async () => readJson(INVENTORY_FILE, []),
-  'PUT /api/inventory': async (q, body) => {
-    const inv = JSON.parse(body);
-    if (!Array.isArray(inv)) throw Object.assign(new Error('Inventory must be an array'), { status: 400 });
-    writeJson(INVENTORY_FILE, inv);
-    return { ok: true, count: inv.length };
-  },
-  'POST /api/import': async (q, body) => importGameInventory(JSON.parse(body)),
-};
+// [method, path pattern, handler(params, query, body)]
+const routes = [
+  ['GET', '/api/config', async () => ({ username: profileSlug(), platform: config.platform, priceTtlMinutes: config.priceTtlMinutes })],
+  ['GET', '/api/items', async (p, q) => getItems(q.get('force') === '1')],
+  ['GET', '/api/price', async (p, q) => getPrice(q.get('slug'), q.get('rank'), q.get('subtype'), q.get('force') === '1')],
+  ['GET', '/api/prices/cached', async () => cachedPrices()],
+  ['GET', '/api/set', async (p, q) => getSet(q.get('slug'))],
+
+  ['GET', '/api/auth', async () => { await verifyAuth().catch(() => {}); return authStatus(); }],
+  ['POST', '/api/auth/login', async (p, q, b) => login(b.email, b.password)],
+  ['POST', '/api/auth/token', async (p, q, b) => loginWithToken(b.token)],
+  ['POST', '/api/auth/logout', async () => { setAuth(null); return authStatus(); }],
+
+  ['GET', '/api/my-orders', async (p, q) => getMyOrders(q.get('force') === '1')],
+  ['POST', '/api/orders', async (p, q, b) => createOrder(b)],
+  ['PATCH', '/api/orders/:id', async (p, q, b) => updateOrder(p.id, b)],
+  ['DELETE', '/api/orders/:id', async (p) => deleteOrder(p.id)],
+  ['POST', '/api/orders/:id/close', async (p, q, b) => closeOrder(p.id, b.quantity)],
+
+  ['GET', '/api/inventory', async () => readJson(INVENTORY_FILE, [])],
+  ['PUT', '/api/inventory', async (p, q, inv) => saveInventory(inv)],
+  ['POST', '/api/inventory', async (p, q, inv) => saveInventory(inv)], // sendBeacon on page close can only POST
+  ['GET', '/api/sales', async () => readJson(SALES_FILE, [])],
+  ['POST', '/api/sales', async (p, q, b) => {
+    const sales = readJson(SALES_FILE, []);
+    sales.push(...[].concat(b.sales ?? []).map((s) => ({ ...s, at: s.at ?? new Date().toISOString() })));
+    writeJson(SALES_FILE, sales);
+    return { ok: true, count: sales.length };
+  }],
+].map(([method, pattern, handler]) => {
+  const names = [];
+  const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, n) => { names.push(n); return '([^/]+)'; }) + '$');
+  return { method, re, names, handler };
+});
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const handler = routes[`${req.method} ${url.pathname}`];
-  if (handler) {
+  for (const r of routes) {
+    if (r.method !== req.method) continue;
+    const m = url.pathname.match(r.re);
+    if (!m) continue;
     try {
-      const body = req.method === 'GET' ? '' : await readBody(req);
-      send(res, 200, await handler(url.searchParams, body));
+      const params = Object.fromEntries(r.names.map((n, i) => [n, decodeURIComponent(m[i + 1])]));
+      const body = req.method === 'GET' ? {} : await readBody(req);
+      send(res, 200, await r.handler(params, url.searchParams, body));
     } catch (err) {
       console.error(err.message);
-      send(res, err.status && err.status < 500 ? err.status : 502, { error: err.message });
+      send(res, err.status && err.status < 600 ? err.status : 502, { error: err.message });
     }
     return;
   }
+  if (url.pathname.startsWith('/api/')) { send(res, 404, { error: 'Not found' }); return; }
 
   // Static files from /public
   const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
@@ -290,5 +491,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(config.port, '127.0.0.1', () => {
-  console.log(`Warframe Help running at http://localhost:${config.port}  (profile: ${config.username})`);
+  console.log(`Warframe Help running at http://localhost:${config.port}  (profile: ${profileSlug()})`);
 });
