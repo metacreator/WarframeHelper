@@ -230,3 +230,8 @@ table.items th:nth-child(13) { width: 36px; }  /* remove */
 table.items td { overflow: hidden; text-overflow: ellipsis; }
 table.items td select { max-width: 100%; }
 table.items .item a { overflow: hidden; text-overflow: ellipsis; }
+
+/* Listing safety: rank not set yet / price far below the market */
+input.needs-rank { border-color: var(--bad); }
+input.needs-rank::placeholder { color: var(--bad); opacity: 1; font-weight: 600; }
+input.price-input.too-low { border-color: var(--bad); color: var(--bad); }

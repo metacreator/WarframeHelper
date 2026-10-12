@@ -1,13 +1,20 @@
 {
   "name": "warframe-help",
   "version": "1.0.0",
-  "description": "Local price checker for your Warframe inventory using the warframe.market API",
+  "description": "Tenno Trade Helper: Firefox add-on for selling Warframe items on warframe.market (plus the older local app)",
   "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node tests/run-firefox.js",
+    "lint": "web-ext lint",
+    "build": "web-ext build --overwrite-dest"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "selenium-webdriver": "4.25.0",
+    "web-ext": "8.3.0"
   }
 }

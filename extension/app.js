@@ -51,6 +51,9 @@ function normalizeEntry(e) {
     // How many to put on the market; null = all of them.
     listQty: e.listQty !== null && e.listQty !== undefined && e.listQty !== '' && listQty >= 1 ? Math.min(Math.round(listQty), qty) : null,
     rank: isRanked(item) ? Math.min(item.maxRank, Math.max(0, Number(e.rank) || 0)) : null,
+    // Screenshots don't show a mod's or arcane's rank, and rank 0 vs max can differ hugely in price, so a
+    // ranked item can't be listed until its rank was typed in or comes from an existing listing.
+    rankKnown: isRanked(item) ? !!e.rankKnown : true,
     subtype: item.subtypes ? (item.subtypes.includes(e.subtype) ? e.subtype : defaultSubtype(item)) : null,
     price: e.price !== null && e.price !== undefined && e.price !== '' && price >= 1 ? Math.round(price) : null,
     gone: e.gone ?? null,
@@ -106,8 +109,10 @@ function addEntries(entries, { replace = false, setQty = false } = {}) {
       const sameItem = state.inventory.filter((x) => x.slug === e.slug);
       if (sameItem.length === 1) existing = sameItem[0];
     }
-    if (existing) existing.qty = setQty ? e.qty : existing.qty + e.qty;
-    else { state.inventory.push(e); added.push(e); }
+    if (existing) {
+      existing.qty = setQty ? e.qty : existing.qty + e.qty;
+      existing.rankKnown ||= e.rankKnown;
+    } else { state.inventory.push(e); added.push(e); }
   }
   saveInventory();
   render();
@@ -277,7 +282,7 @@ function addMissingListedItems() {
   for (const list of state.listings.values()) {
     for (const o of list) {
       if (matched.has(o)) continue;
-      const entry = normalizeEntry({ slug: state.byId.get(o.itemId).slug, qty: o.quantity, rank: o.rank ?? null, subtype: o.subtype ?? null });
+      const entry = normalizeEntry({ slug: state.byId.get(o.itemId).slug, qty: o.quantity, rank: o.rank ?? null, rankKnown: true, subtype: o.subtype ?? null });
       if (state.inventory.some((e) => rowKey(e) === rowKey(entry)) || missing.some((e) => rowKey(e) === rowKey(entry))) continue;
       missing.push(entry);
     }
@@ -318,19 +323,24 @@ async function rowAction(entry, label, fn) {
   }
 }
 
-function listEntry(entry) {
+async function listEntry(entry) {
   if (!requireAuth()) return;
+  if (!buildRow(entry).rankKnown) { setStatus(`Set the rank of ${state.bySlug.get(entry.slug).name} first.`); return; }
+  await ensureFreshPrices([entry]);
   const r = buildRow(entry);
   if (!r.sellAt) { setStatus('No price yet: type one in "Sell at".'); return; }
+  if (underpriced(r) && !confirm(`${underpricedText(r)}\n\nList at ${r.sellAt}p anyway?`)) return;
   rowAction(entry, 'Listing', async () => {
     await Backend.createOrder({ slug: entry.slug, platinum: r.sellAt, quantity: listQtyOf(entry), rank: entry.rank, subtype: entry.subtype });
     setStatus(`Listed ${listQtyOf(entry)}× ${r.name} at ${r.sellAt}p.`);
   });
 }
 
-function updateEntry(entry) {
+async function updateEntry(entry) {
   if (!requireAuth()) return;
+  await ensureFreshPrices([entry]);
   const r = buildRow(entry);
+  if (r.sellAt !== r.listing.platinum && underpriced(r) && !confirm(`${underpricedText(r)}\n\nChange your listing to ${r.sellAt}p anyway?`)) return;
   rowAction(entry, 'Update', async () => {
     await Backend.updateOrder(r.listing.id, { platinum: r.sellAt, quantity: listQtyOf(entry) });
     setStatus(`Updated ${r.name}: ${listQtyOf(entry)}× at ${r.sellAt}p.`);
@@ -372,11 +382,26 @@ async function soldEntry(entry, preset) {
 
 async function listAllUnlisted() {
   if (!requireAuth()) return;
-  const rows = filteredRows().filter((r) => !r.listing && !r.e.gone && r.sellAt);
-  if (!rows.length) { setStatus('Nothing to list: every item shown is already listed or has no price.'); return; }
+  $('#listAllBtn').disabled = true;
+  try {
+    const candidates = filteredRows().filter((r) => !r.listing && !r.e.gone);
+    await ensureFreshPrices(candidates.filter((r) => r.rankKnown).map((r) => r.e));
+  } finally {
+    $('#listAllBtn').disabled = false;
+  }
+  const unlisted = filteredRows().filter((r) => !r.listing && !r.e.gone);
+  const needRank = unlisted.filter((r) => !r.rankKnown);
+  const cheap = unlisted.filter((r) => r.rankKnown && underpriced(r));
+  const rows = unlisted.filter((r) => r.rankKnown && r.sellAt && !underpriced(r));
+  const skipped = [
+    needRank.length ? `Skipped, rank not set (${needRank.length}): ${needRank.map((r) => r.name).join(', ')}` : '',
+    cheap.length ? `Skipped, price looks too low (${cheap.length}): ${cheap.map((r) => `${r.name} ${r.sellAt}p vs median ${r.medianSell}p`).join(', ')}. List these one by one if you mean it.` : '',
+  ].filter(Boolean).join('\n\n');
+  if (!rows.length) { setStatus('Nothing to list.' + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
   const total = rows.reduce((s, r) => s + r.sellAt * listQtyOf(r.e), 0);
   if (!confirm(`List ${rows.length} items on warframe.market for ${total.toLocaleString()}p in total?\n\n`
-    + rows.slice(0, 15).map((r) => `${listQtyOf(r.e)}× ${r.name}: ${r.sellAt}p`).join('\n') + (rows.length > 15 ? `\n…and ${rows.length - 15} more` : ''))) return;
+    + rows.slice(0, 15).map((r) => `${listQtyOf(r.e)}× ${r.name}: ${r.sellAt}p`).join('\n') + (rows.length > 15 ? `\n…and ${rows.length - 15} more` : '')
+    + (skipped ? `\n\n${skipped}` : ''))) return;
   $('#listAllBtn').disabled = true;
   let ok = 0;
   const failed = [];
@@ -443,7 +468,30 @@ function buildRow(e) {
     dpp: item.ducats && lowest ? item.ducats / lowest : null,
     sellAt: e.price ?? defaultPrice(lowest),
     listed: listing ? listing.platinum : null,
+    rankKnown: e.rankKnown || !!listing,
   };
+}
+
+// A price far under what online sellers typically ask is usually a mistake, or undercutting someone's
+// troll listing (a 1p offer drags "lowest online" down with it).
+function underpriced(r) {
+  const median = r.medianSell;
+  if (!r.sellAt || !median || (r.price?.sellers ?? 0) < 3) return false;
+  return r.sellAt < median * 0.6 && median - r.sellAt >= 3;
+}
+
+const underpricedText = (r) => `${r.name}: ${r.sellAt}p is far below what online sellers ask (median ${r.medianSell}p, cheapest ${r.lowestSell}p).`;
+
+// Listing uses the newest prices: anything older than a few minutes is fetched again first.
+const LIST_FRESH_MS = 5 * 60 * 1000;
+async function ensureFreshPrices(entries) {
+  const stale = entries.filter((e) => {
+    const p = state.prices.get(rowKey(e));
+    return !p?.fetchedAt || Date.now() - p.fetchedAt > LIST_FRESH_MS;
+  });
+  if (!stale.length) return;
+  setStatus(`Checking current prices for ${stale.length} item${stale.length === 1 ? '' : 's'}…`);
+  await fetchPrices(stale, { refetch: true, force: true });
 }
 
 function filteredRows() {
@@ -467,6 +515,9 @@ function filteredRows() {
 function rankCell(r) {
   const { e, item } = r;
   if (isRanked(item)) {
+    if (!r.rankKnown) {
+      return `<input class="num needs-rank" type="number" min="0" max="${item.maxRank}" value="" placeholder="?" data-field="rank" title="Rank unknown (screenshots don't show it). Enter 0–${item.maxRank} before listing.">`;
+    }
     return `<input class="num" type="number" min="0" max="${item.maxRank}" value="${e.rank}" data-field="rank" title="0–${item.maxRank}">`;
   }
   if (item.subtypes) {
@@ -484,6 +535,7 @@ function priceCell(r, field) {
   const title = r.price?.fetchedAt ? `Fetched ${ago(r.price.fetchedAt)}` : '';
   if (v === null && field === 'lowestSell' && r.price?.sellers === 0) return `<span class="muted" title="No online sellers right now. ${title}">none online</span>`;
   if (v === null) return fmt(null);
+  if (!r.rankKnown) return `<span class="plat stale" title="Price at rank 0. Set the rank to see the right price.">${v}</span>`;
   return `<span class="plat${stale || loading ? ' stale' : ''}" title="${title}">${v}</span>`;
 }
 
@@ -501,7 +553,7 @@ function listingCell(r) {
 
   if (!listing) {
     return `<div class="actions"><span class="muted">—</span>
-      <button class="small" data-action="list"${r.sellAt ? '' : ' disabled'} title="${state.auth.connected ? `List ${listQtyOf(e)}× at ${r.sellAt ?? '?'}p` : 'Log in on warframe.market to list'}">List</button>
+      <button class="small" data-action="list"${r.sellAt && r.rankKnown ? '' : ' disabled'} title="${!r.rankKnown ? 'Set the rank first' : state.auth.connected ? `List ${listQtyOf(e)}× at ${r.sellAt ?? '?'}p` : 'Log in on warframe.market to list'}">List</button>
       ${sold}</div>`;
   }
 
@@ -547,8 +599,8 @@ const rowHtml = (r) => `
       <td class="r">${r.value === null ? fmt(null) : `<b class="plat">${r.value}</b>`}</td>
       <td class="r">${fmt(r.ducats)}</td>
       <td class="r">${r.dpp === null ? fmt(null) : r.dpp.toFixed(1)}</td>
-      <td class="r"><input class="num price-input${r.e.price ? ' custom' : ''}" type="number" min="1" data-field="price"
-        value="${r.e.price ?? ''}" placeholder="${defaultPrice(r.lowestSell) ?? ''}" title="Empty = lowest online − undercut"></td>
+      <td class="r"><input class="num price-input${r.e.price ? ' custom' : ''}${r.rankKnown && underpriced(r) ? ' too-low' : ''}" type="number" min="1" data-field="price"
+        value="${r.e.price ?? ''}" placeholder="${defaultPrice(r.lowestSell) ?? ''}" title="${r.rankKnown && underpriced(r) ? esc(underpricedText(r)) : 'Empty = lowest online − undercut'}"></td>
       <td class="r"><input class="num${r.e.listQty ? ' custom' : ''}" type="number" min="1" max="${r.qty}" data-field="listQty"
         value="${r.e.listQty ?? ''}" placeholder="${r.qty}" title="Empty = all ${r.qty}"></td>
       <td>${listingCell(r)}</td>
@@ -606,13 +658,15 @@ function render() {
   const totalPlat = rows.reduce((s, r) => s + (r.value ?? 0), 0);
   const totalDucats = rows.reduce((s, r) => s + (r.ducats ?? 0) * r.qty, 0);
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
-  const listable = unlisted.filter((r) => r.sellAt).length;
+  const listable = unlisted.filter((r) => r.sellAt && r.rankKnown && !underpriced(r)).length;
+  const rankNeeded = unlisted.filter((r) => !r.rankKnown).length;
   $('#summary').innerHTML = `
     <span>Rows <b>${rows.length}</b></span>
     <span>Items <b>${totalQty}</b></span>
     <span>Market value <b class="plat">${totalPlat.toLocaleString()}p</b></span>
     <span>Ducats <b>${totalDucats.toLocaleString()}</b></span>
-    <span>Not listed yet <b>${unlisted.length}</b></span>`;
+    <span>Not listed yet <b>${unlisted.length}</b></span>${rankNeeded ? `
+    <span class="bad" title="Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing">Rank needed <b>${rankNeeded}</b></span>` : ''}`;
   $('#listAllBtn').textContent = listable ? `List all unlisted (${listable})` : 'List all unlisted';
 
   const gone = state.inventory.filter((e) => e.gone).length;
@@ -628,7 +682,7 @@ function render() {
 
 function renderTradeMessage(rows) {
   const parts = rows
-    .filter((r) => r.sellAt)
+    .filter((r) => r.sellAt && r.rankKnown) // a rank-unknown price is the rank 0 price
     .map((r) => `[${r.name}]${r.e.rank ? ` r${r.e.rank}` : ''}${r.e.subtype && r.category === 'Relic' ? ` ${r.e.subtype}` : ''} ${r.sellAt}p`);
   const messages = [];
   let current = 'WTS';
@@ -731,7 +785,7 @@ function wireEvents() {
     ev.preventDefault();
     const item = findItem($('#addName').value);
     if (!item) { setStatus(`No market item matches "${$('#addName').value}"`); return; }
-    addEntries([{ slug: item.slug, qty: $('#addQty').value, rank: $('#addRank').value }]);
+    addEntries([{ slug: item.slug, qty: $('#addQty').value, rank: $('#addRank').value, rankKnown: $('#addRank').value !== '' }]);
     $('#addName').value = '';
     $('#addQty').value = 1;
     $('#addRank').value = '';
@@ -782,6 +836,7 @@ function wireEvents() {
       const entry = findEntry(ev.target.closest('tr')?.dataset.key);
       if (!field || !entry) return;
       entry[field] = field === 'subtype' ? ev.target.value : ev.target.value === '' ? null : Number(ev.target.value);
+      if (field === 'rank') entry.rankKnown = ev.target.value !== '';
       Object.assign(entry, normalizeEntry(entry));
       saveInventory();
       if (field === 'rank' || field === 'subtype') fetchPrices([entry]).then(render);

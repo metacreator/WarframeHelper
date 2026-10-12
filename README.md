@@ -84,4 +84,5 @@ it works like a logged-in session.
 
 ## Testing
 
-`WFM_API_URL` overrides the warframe.market address, so the app can be pointed at a mock server instead of your real account.
+See [tests/README.md](tests/README.md): `npm install` then `npm test` runs the add-on end to end in Firefox against a fake warframe.market.
+For the local app, `WFM_API_URL` overrides the warframe.market address.

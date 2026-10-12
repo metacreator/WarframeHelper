@@ -53,6 +53,11 @@ To release an update, raise `version` in `manifest.json`, rebuild, and upload th
 constructor inside the bundled Tesseract library, and `innerHTML` in the page code. All text that comes
 from warframe.market is escaped before it is inserted into the page.
 
+## Testing
+
+`npm test` from the repository root runs the add-on end to end in Firefox against a fake warframe.market
+(no real account involved). See `tests/README.md`.
+
 ## How it works
 
 | File | Role |
