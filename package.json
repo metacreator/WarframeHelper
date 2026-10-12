@@ -1,0 +1,13 @@
+{
+  "name": "warframe-help",
+  "version": "1.0.0",
+  "description": "Local price checker for your Warframe inventory using the warframe.market API",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
