@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Backend, h, fill */
+/* global browser, Backend, h, fill, t, tk, setPageLang, guessLanguage, translatePage, PAGE_LANGS */
 
 const ASSETS = 'https://warframe.market/static/assets/';
 const $ = (sel) => document.querySelector(sel);
@@ -10,10 +10,14 @@ const state = {
   items: [],
   bySlug: new Map(),
   byId: new Map(),
-  byName: new Map(),
+  byName: new Map(),    // lower-case English name -> item
+  names: null,          // { slug: name } in the page language; null = English
+  byLocalName: new Map(),
   inventory: [],        // [{ slug, qty, rank, subtype, price, gone }]
   prices: new Map(),    // rowKey -> price summary
   loadingPrices: new Set(),
+  stats: new Map(),     // slug -> { fetchedAt, days: [{ at, volume, price, rank, subtype }] } completed trades
+  loadingStats: new Set(),
   busyRows: new Set(),  // rows with a listing request in flight
   listings: new Map(),  // slug -> [your sell orders]
   sales: [],
@@ -28,15 +32,37 @@ const fmt = (n) => (n === null || n === undefined ? dash() : n.toLocaleString())
 const plat = (n, tag = 'span') => h(tag, { class: 'plat' }, n);
 
 function category(item) {
-  const t = item.tags;
-  if (t.includes('prime') && t.includes('set')) return 'Prime Set';
+  const tags = item.tags;
+  if (tags.includes('prime') && tags.includes('set')) return 'Prime Set';
   // Main blueprints ("Hydroid Prime Blueprint") are tagged "blueprint" rather than "component".
-  if (t.includes('prime') && (t.includes('component') || t.includes('blueprint'))) return 'Prime Part';
-  if (t.includes('mod')) return 'Mod';
-  if (t.includes('arcane_enhancement')) return 'Arcane';
-  if (t.includes('relic')) return 'Relic';
+  if (tags.includes('prime') && (tags.includes('component') || tags.includes('blueprint'))) return 'Prime Part';
+  if (tags.includes('mod')) return 'Mod';
+  if (tags.includes('arcane_enhancement')) return 'Arcane';
+  if (tags.includes('relic')) return 'Relic';
   return 'Other';
 }
+
+const CATEGORY_LABELS = {
+  'Prime Part': tk('Prime parts'), 'Prime Set': tk('Prime sets'), Mod: tk('Mods'), Arcane: tk('Arcanes'), Relic: tk('Relics'), Other: tk('Other'),
+};
+// Shown translated; stored or sent in English: relic refinements, sale notes, messages from lib/backend.js.
+tk('intact'); tk('exceptional'); tk('flawless'); tk('radiant');
+tk('marked sold on warframe.market');
+tk('Log in on warframe.market first.');
+tk('Your warframe.market session ended. Log in on warframe.market again.');
+tk('Could not reach warframe.market. Check your connection, and that the add-on is allowed to access warframe.market.');
+tk('warframe.market is busy right now. Try again in a minute.');
+tk('Price must be at least 1 platinum.');
+tk('That file is not a Tenno Trade Helper backup.');
+const HOW = {
+  soldHere: tk('marked sold in Tenno Trade Helper'),
+  goneSold: tk('confirmed after listing disappeared'),
+  baro: tk("traded to Baro Ki'Teer"),
+};
+const errText = (err) => t(err.message);
+
+// Item names in the page language (warframe.market's own translations); English until they're loaded.
+const itemName = (item) => state.names?.[item.slug] ?? item.name;
 
 const isRanked = (item) => item.maxRank !== null;
 const defaultSubtype = (item) => (item.subtypes ? item.subtypes[0] : null);
@@ -69,10 +95,10 @@ function setStatus(text) { $('#status').textContent = text; }
 
 function ago(ts) {
   const min = Math.round((Date.now() - ts) / 60000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min} min ago`;
-  const h = Math.round(min / 60);
-  return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+  if (min < 1) return t('just now');
+  if (min < 60) return t('{n} min ago', { n: min });
+  const hours = Math.round(min / 60);
+  return hours < 48 ? t('{n} h ago', { n: hours }) : t('{n} days ago', { n: Math.round(hours / 24) });
 }
 
 function storageGet(key, fallback) {
@@ -89,7 +115,7 @@ let saveChain = Promise.resolve();
 function saveInventory() {
   saveChain = saveChain
     .then(() => Backend.saveInventory(state.inventory))
-    .catch((err) => setStatus('Could not save: ' + err.message));
+    .catch((err) => setStatus(t('Could not save: {error}', { error: errText(err) })));
   return saveChain;
 }
 
@@ -132,20 +158,18 @@ function removeQuantity(entry, qty) {
   saveInventory();
 }
 
-// ---------- name lookup (for typed names) ----------
+// ---------- name lookup (for typed names, in English or the page language) ----------
 
 function findItem(text) {
   const q = text.trim().toLowerCase().replace(/\s+/g, ' ').replace(/\bbp\b/g, 'blueprint');
   if (!q) return null;
-  const exact = state.byName.get(q) || state.byName.get(q + ' blueprint') || state.bySlug.get(q.replace(/ /g, '_'));
+  const exact = state.byLocalName.get(q) || state.byName.get(q) || state.byName.get(q + ' blueprint') || state.bySlug.get(q.replace(/ /g, '_'));
   if (exact) return exact;
   const words = q.split(' ');
-  const candidates = state.items.filter((i) => {
-    const n = i.name.toLowerCase();
-    return words.every((w) => n.includes(w));
-  });
+  const names = (i) => [i.name.toLowerCase(), itemName(i).toLowerCase()];
+  const candidates = state.items.filter((i) => names(i).some((n) => words.every((w) => n.includes(w))));
   if (candidates.length === 1) return candidates[0];
-  const prefixed = candidates.filter((i) => i.name.toLowerCase().startsWith(q));
+  const prefixed = candidates.filter((i) => names(i).some((n) => n.startsWith(q)));
   if (prefixed.length === 1) return prefixed[0];
   return null;
 }
@@ -170,7 +194,7 @@ async function fetchPrice(entry, force = false) {
   try {
     state.prices.set(key, await Backend.getPrice(entry.slug, entry.rank, entry.subtype, force));
   } catch (err) {
-    if (!state.prices.get(key)?.lowestSell) state.prices.set(key, { error: err.message });
+    if (!state.prices.get(key)?.lowestSell) state.prices.set(key, { error: errText(err) });
   } finally {
     state.loadingPrices.delete(key);
   }
@@ -186,21 +210,57 @@ function renderSoon() {
 // refetch: ask again even for prices that aren't stale. force: also skip the price cache.
 async function fetchPrices(entries, { refetch = false, force = false } = {}) {
   const todo = entries.filter((e) => refetch || isStale(state.prices.get(rowKey(e))));
-  if (!todo.length) return;
+  if (!todo.length) { fetchStats(entries); return; }
   let done = 0;
   const worker = async () => {
     while (todo.length) {
       const e = todo.shift();
       await fetchPrice(e, force);
       done++;
-      setStatus(`Fetching prices… ${done} done, ${todo.length} left`);
+      setStatus(t('Fetching prices… {done} done, {left} left', { done, left: todo.length }));
       renderSoon();
     }
   };
   // Requests are queued to respect the API rate limit; 3 workers keep the queue full.
   await Promise.all([worker(), worker(), worker()]);
-  setStatus(`Prices updated ${new Date().toLocaleTimeString()}`);
+  setStatus(t('Prices updated {time}', { time: new Date().toLocaleTimeString() }));
   render();
+  fetchStats(entries); // history after prices: it matters less and shares the same request budget
+}
+
+// ---------- price history (completed trades, cached for hours) ----------
+
+async function loadCachedStats() {
+  state.stats = new Map(Object.entries(await Backend.cachedStats()));
+}
+
+async function fetchStats(entries) {
+  const slugs = [...new Set(entries.map((e) => e.slug))].filter((slug) => {
+    const s = state.stats.get(slug);
+    return !state.loadingStats.has(slug) && (!s || Date.now() - s.fetchedAt > Backend.STATS_TTL);
+  });
+  slugs.forEach((slug) => state.loadingStats.add(slug));
+  for (const slug of slugs) {
+    try {
+      state.stats.set(slug, await Backend.getStats(slug));
+    } catch { /* no history for this item right now; prices still work */ }
+    state.loadingStats.delete(slug);
+    renderSoon();
+  }
+}
+
+// Trades of this exact rank / refinement over the last 7 days: volume-weighted average price and volume.
+function history(e) {
+  const s = state.stats.get(e.slug);
+  if (!s) return null;
+  const since = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const days = s.days.filter((d) => d.at >= since && (d.rank === null || d.rank === e.rank) && (d.subtype === null || d.subtype === e.subtype));
+  const trades = days.reduce((n, d) => n + d.volume, 0);
+  return {
+    avg: trades ? Math.round(days.reduce((sum, d) => sum + d.price * d.volume, 0) / trades) : null,
+    trades,
+    perDay: trades / 7,
+  };
 }
 
 async function refreshAll() {
@@ -231,24 +291,26 @@ function renderAccount() {
   const { connected, user, reason } = state.auth;
   $('#accessBanner').hidden = reason !== 'no-access';
   if (connected) {
-    fill($('#accountText'), 'Connected as ',
-      h('a', { href: `https://warframe.market/profile/${encodeURIComponent(user.slug)}`, target: '_blank', rel: 'noopener', title: 'Your warframe.market profile' },
-        h('b', null, user.ingameName ?? user.slug)));
+    const name = h('a', { href: `https://warframe.market/profile/${encodeURIComponent(user.slug)}`, target: '_blank', rel: 'noopener', title: t('Your warframe.market profile') },
+      h('b', null, user.ingameName ?? user.slug));
+    const [before, after] = t('Connected as {name}').split('{name}');
+    fill($('#accountText'), before, name, after);
     $('#accountBtn').hidden = true;
   } else {
-    $('#accountText').textContent = reason === 'no-access' ? 'No access to warframe.market yet' : 'Not logged in on warframe.market';
-    $('#accountBtn').hidden = reason === 'no-access';
+    $('#accountText').textContent = reason === 'checking' ? t('Checking your warframe.market login…')
+      : reason === 'no-access' ? t('No access to warframe.market yet') : t('Not logged in on warframe.market');
+    $('#accountBtn').hidden = reason === 'no-access' || reason === 'checking';
   }
 }
 
 function openLoginPage() {
   browser.tabs.create({ url: `${Backend.SITE}/auth/signin` });
-  setStatus('Log in on warframe.market in the new tab; this page notices automatically.');
+  setStatus(t('Log in on warframe.market in the new tab; this page notices automatically.'));
 }
 
 function requireAuth() {
   if (state.auth.connected) return true;
-  if (state.auth.reason === 'no-access') setStatus('Click "Allow access" at the top first.');
+  if (state.auth.reason === 'no-access') setStatus(t('Click "Allow access" at the top first.'));
   else openLoginPage();
   return false;
 }
@@ -270,14 +332,14 @@ async function loadListings(force = false) {
     if (sold.length || gone.length) {
       await reloadInventory();
       await loadSales();
-      if (sold.length) setStatus(`Sold on warframe.market: ${sold.map((s) => `${s.qty}× ${s.name}`).join(', ')}. Removed from your list.`);
-      else setStatus(`${gone.length} listing${gone.length === 1 ? '' : 's'} disappeared from warframe.market. Did they sell?`);
+      if (sold.length) setStatus(t('Sold on warframe.market: {items}. Removed from your list.', { items: sold.map((s) => `${s.qty}× ${itemName(state.bySlug.get(s.slug) ?? s)}`).join(', ') }));
+      else setStatus(t('{n} listings disappeared from warframe.market. Did they sell?', { n: gone.length }));
     }
     addMissingListedItems();
     render();
   } catch (err) {
     if (err.status === 401) await loadAuth();
-    setStatus('Could not load your listings: ' + err.message);
+    setStatus(t('Could not load your listings: {error}', { error: errText(err) }));
   }
 }
 
@@ -298,7 +360,7 @@ function addMissingListedItems() {
   state.inventory.push(...missing);
   saveInventory();
   fetchPrices(missing);
-  setStatus(`Added ${missing.length} item${missing.length === 1 ? '' : 's'} you have listed on warframe.market.`);
+  setStatus(t('Added {n} items you have listed on warframe.market.', { n: missing.length }));
 }
 
 function listingFor(entry) {
@@ -315,6 +377,7 @@ function defaultPrice(lowest) {
   return lowest === null || lowest === undefined ? null : Math.max(1, lowest - undercut());
 }
 
+// label: what was being done, already translated ("Listing", "Update"…), for the error message.
 async function rowAction(entry, label, fn) {
   const key = rowKey(entry);
   state.busyRows.add(key);
@@ -323,7 +386,7 @@ async function rowAction(entry, label, fn) {
     await fn();
   } catch (err) {
     if (err.status === 401) await loadAuth();
-    setStatus(`${label} failed: ${err.message}`);
+    setStatus(t('{action} failed: {error}', { action: label, error: errText(err) }));
   } finally {
     state.busyRows.delete(key);
     await loadListings(true);
@@ -332,14 +395,14 @@ async function rowAction(entry, label, fn) {
 
 async function listEntry(entry) {
   if (!requireAuth()) return;
-  if (!buildRow(entry).rankKnown) { setStatus(`Set the rank of ${state.bySlug.get(entry.slug).name} first.`); return; }
+  if (!buildRow(entry).rankKnown) { setStatus(t('Set the rank of {name} first.', { name: itemName(state.bySlug.get(entry.slug)) })); return; }
   await ensureFreshPrices([entry]);
   const r = buildRow(entry);
-  if (!r.sellAt) { setStatus('No price yet: type one in "Sell at".'); return; }
-  if (underpriced(r) && !confirm(`${underpricedText(r)}\n\nList at ${r.sellAt}p anyway?`)) return;
-  rowAction(entry, 'Listing', async () => {
+  if (!r.sellAt) { setStatus(t('No price yet: type one in "Sell at".')); return; }
+  if (underpriced(r) && !confirm(`${underpricedText(r)}\n\n${t('List at {price}p anyway?', { price: r.sellAt })}`)) return;
+  rowAction(entry, t('Listing'), async () => {
     await Backend.createOrder({ slug: entry.slug, platinum: r.sellAt, quantity: listQtyOf(entry), rank: entry.rank, subtype: entry.subtype });
-    setStatus(`Listed ${listQtyOf(entry)}× ${r.name} at ${r.sellAt}p.`);
+    setStatus(t('Listed {qty}× {name} at {price}p.', { qty: listQtyOf(entry), name: r.name, price: r.sellAt }));
   });
 }
 
@@ -347,19 +410,19 @@ async function updateEntry(entry) {
   if (!requireAuth()) return;
   await ensureFreshPrices([entry]);
   const r = buildRow(entry);
-  if (r.sellAt !== r.listing.platinum && underpriced(r) && !confirm(`${underpricedText(r)}\n\nChange your listing to ${r.sellAt}p anyway?`)) return;
-  rowAction(entry, 'Update', async () => {
+  if (r.sellAt !== r.listing.platinum && underpriced(r) && !confirm(`${underpricedText(r)}\n\n${t('Change your listing to {price}p anyway?', { price: r.sellAt })}`)) return;
+  rowAction(entry, t('Update'), async () => {
     await Backend.updateOrder(r.listing.id, { platinum: r.sellAt, quantity: listQtyOf(entry) });
-    setStatus(`Updated ${r.name}: ${listQtyOf(entry)}× at ${r.sellAt}p.`);
+    setStatus(t('Updated {name}: {qty}× at {price}p.', { name: r.name, qty: listQtyOf(entry), price: r.sellAt }));
   });
 }
 
 function unlistEntry(entry) {
   if (!requireAuth()) return;
   const r = buildRow(entry);
-  rowAction(entry, 'Unlist', async () => {
+  rowAction(entry, t('Unlist'), async () => {
     await Backend.deleteOrder(r.listing.id);
-    setStatus(`Removed your listing for ${r.name}.`);
+    setStatus(t('Removed your listing for {name}.', { name: r.name }));
   });
 }
 
@@ -367,7 +430,7 @@ async function soldEntry(entry, preset) {
   const r = buildRow(entry);
   let qty = preset ?? 1;
   if (preset === undefined && entry.qty > 1) {
-    const answer = prompt(`How many ${r.name} did you sell? (1–${entry.qty})`, '1');
+    const answer = prompt(`${t('How many {name} did you sell?', { name: r.name })} (1–${entry.qty})`, '1');
     if (answer === null) return;
     qty = Math.round(Number(answer));
     if (!(qty >= 1)) return;
@@ -377,47 +440,96 @@ async function soldEntry(entry, preset) {
 
   if (r.listing && state.auth.connected && !entry.gone) {
     // Closing the order records the trade on warframe.market and lowers the listed quantity.
-    await rowAction(entry, 'Marking as sold', () => Backend.closeOrder(r.listing.id, Math.min(qty, r.listing.quantity)));
+    await rowAction(entry, t('Marking as sold'), () => Backend.closeOrder(r.listing.id, Math.min(qty, r.listing.quantity)));
   } else if (r.listing && !entry.gone) {
-    setStatus('Marked as sold here. Log in on warframe.market to also update the listing there.');
+    setStatus(t('Marked as sold here. Log in on warframe.market to also update the listing there.'));
   }
-  recordSales([{ slug: entry.slug, name: r.name, qty, platinum, how: entry.gone ? 'confirmed after listing disappeared' : 'marked sold in Tenno Trade Helper' }]);
+  recordSales([{ slug: entry.slug, name: r.item.name, qty, platinum, how: entry.gone ? HOW.goneSold : HOW.soldHere }]);
   entry.gone = null;
   removeQuantity(entry, qty);
   render();
 }
 
+// When items leave the list some other way than a sale (Baro, combining or splitting sets), a listing can't
+// offer more than remain: it's lowered, or removed when none are left. Returns false if that failed.
+async function fitListing(entry, left) {
+  const listing = listingFor(entry);
+  if (!listing || entry.gone || listing.quantity <= left) return true;
+  const name = itemName(state.bySlug.get(entry.slug));
+  if (!state.auth.connected) { setStatus(t('{name} is listed on warframe.market. Log in there first, so the listing can be lowered too.', { name })); return false; }
+  await rowAction(entry, t('Updating the listing'), () => (left > 0
+    ? Backend.updateOrder(listing.id, { quantity: left })
+    : Backend.deleteOrder(listing.id)));
+  return (listingFor(entry)?.quantity ?? 0) <= left; // on failure the error is in the status line
+}
+
+// Asks how many (1–max) when there's a choice; null when cancelled. question is already translated.
+function askCount(question, max, preset = max) {
+  if (max <= 1) return max;
+  const answer = prompt(`${question} (1–${max})`, String(preset));
+  if (answer === null) return null;
+  const n = Math.min(max, Math.round(Number(answer)));
+  return n >= 1 ? n : null;
+}
+
 // Traded to Baro Ki'Teer for ducats: the items leave the list, and a listing for them shrinks or goes too.
 async function baroEntry(entry) {
   const r = buildRow(entry);
-  let qty = entry.qty;
-  if (entry.qty > 1) {
-    const answer = prompt(`How many ${r.name} did you trade to Baro Ki'Teer? (1–${entry.qty})`, String(entry.qty));
-    if (answer === null) return;
-    qty = Math.min(entry.qty, Math.round(Number(answer)));
-    if (!(qty >= 1)) return;
-  }
-  const left = entry.qty - qty;
-  if (r.listing && !entry.gone && left < r.listing.quantity) {
-    if (!state.auth.connected) { setStatus(`${r.name} is listed on warframe.market. Log in there first, so the listing can be lowered too.`); return; }
-    await rowAction(entry, 'Updating the listing', () => (left > 0
-      ? Backend.updateOrder(r.listing.id, { quantity: left })
-      : Backend.deleteOrder(r.listing.id)));
-    if ((listingFor(entry)?.quantity ?? 0) > left) return; // the change failed; the error is in the status line
-  }
-  recordSales([{ slug: entry.slug, name: r.name, qty, platinum: null, ducats: r.ducats, how: "traded to Baro Ki'Teer" }]);
+  const qty = askCount(t("How many {name} did you trade to Baro Ki'Teer?", { name: r.name }), entry.qty);
+  if (qty === null || !(await fitListing(entry, entry.qty - qty))) return;
+  recordSales([{ slug: entry.slug, name: r.item.name, qty, platinum: null, ducats: r.ducats, how: HOW.baro }]);
   removeQuantity(entry, qty);
-  setStatus(`Traded ${qty}× ${r.name} to Baro Ki'Teer for ${(r.ducats * qty).toLocaleString()} ducats.`);
+  setStatus(t("Traded {qty}× {name} to Baro Ki'Teer for {ducats} ducats.", { qty, name: r.name, ducats: (r.ducats * qty).toLocaleString() }));
   render();
+}
+
+// ---------- complete sets: combine parts into a set row, or split it back ----------
+
+// The parts leave their rows and the set gets its own, which lists, prices and sells like any other row.
+// When the set sells, its parts are already gone from the list.
+async function combineSet(setSlug) {
+  const info = await Backend.getSet(setSlug).catch(() => null);
+  const set = state.bySlug.get(setSlug);
+  if (!info || !set) return;
+  const partEntry = (slug) => state.inventory.find((e) => e.slug === slug);
+  const max = Math.min(...info.parts.map((p) => Math.floor((partEntry(p.slug)?.qty ?? 0) / p.quantityInSet)));
+  if (!(max >= 1)) return;
+  const setName = itemName(set);
+  const n = askCount(t('How many {name} do you want to make?', { name: setName }), max);
+  if (n === null) return;
+  const uses = info.parts.map((p) => ({ entry: partEntry(p.slug), qty: p.quantityInSet * n, name: state.bySlug.has(p.slug) ? itemName(state.bySlug.get(p.slug)) : p.slug }));
+  const listed = uses.filter((u) => (listingFor(u.entry)?.quantity ?? 0) > u.entry.qty - u.qty);
+  if (!confirm([
+    t('Combine into {qty}× {name}?', { qty: n, name: setName }),
+    t('Uses {parts}. The set gets its own row, ready to list. "Split" on that row undoes this.', { parts: uses.map((u) => `${u.qty}× ${u.name}`).join(', ') }),
+    listed.length ? t('Listed separately right now, so those listings will be lowered or removed: {names}', { names: listed.map((u) => u.name).join(', ') }) : '',
+  ].filter(Boolean).join('\n\n'))) return;
+  for (const u of listed) if (!(await fitListing(u.entry, u.entry.qty - u.qty))) return;
+  for (const u of uses) removeQuantity(u.entry, u.qty);
+  addEntries([{ slug: setSlug, qty: n, rank: null, subtype: null }]);
+  setStatus(t('Combined into {qty}× {name}.', { qty: n, name: setName }));
+  computeSets();
+}
+
+async function splitSet(entry) {
+  const info = await Backend.getSet(entry.slug).catch(() => null);
+  if (!info) { setStatus(t('Could not load the parts of this set.')); return; }
+  const name = itemName(state.bySlug.get(entry.slug));
+  const n = askCount(t('How many {name} do you want to split into parts?', { name }), entry.qty, 1);
+  if (n === null || !(await fitListing(entry, entry.qty - n))) return;
+  removeQuantity(entry, n);
+  addEntries(info.parts.map((p) => ({ slug: p.slug, qty: p.quantityInSet * n, rank: null, subtype: null })));
+  setStatus(t('Split {qty}× {name} into its parts.', { qty: n, name }));
+  computeSets();
 }
 
 function toggleVisible(entry) {
   if (!requireAuth()) return;
   const r = buildRow(entry);
   const visible = r.listing.visible === false;
-  rowAction(entry, visible ? 'Showing' : 'Hiding', async () => {
+  rowAction(entry, visible ? t('Showing') : t('Hiding'), async () => {
     await Backend.updateOrder(r.listing.id, { visible });
-    setStatus(visible ? `${r.name} is visible on warframe.market again.` : `${r.name} is hidden: still listed, but nobody sees it.`);
+    setStatus(visible ? t('{name} is visible on warframe.market again.', { name: r.name }) : t('{name} is hidden: still listed, but nobody sees it.', { name: r.name }));
   });
 }
 
@@ -435,6 +547,12 @@ function repriceTargets(rows) {
   };
 }
 
+// The "Skipped…" paragraphs of a confirm message; each is [label, rows, how a row is described].
+const skippedText = (groups) => groups
+  .filter(([, rows]) => rows.length)
+  .map(([label, rows, describe]) => `${label} (${rows.length}): ${rows.map(describe).join(', ')}`)
+  .join('\n\n');
+
 async function repriceListings() {
   if (!requireAuth()) return;
   $('#repriceBtn').disabled = true;
@@ -444,23 +562,25 @@ async function repriceListings() {
     $('#repriceBtn').disabled = false;
   }
   const { own, alone, cheap, changes } = repriceTargets(filteredRows());
-  const skipped = [
-    own.length ? `Kept your own "Sell at" price (${own.length}): ${own.map((r) => `${r.name} ${r.e.price}p`).join(', ')}` : '',
-    alone.length ? `No other seller online (${alone.length}): ${alone.map((r) => r.name).join(', ')}` : '',
-    cheap.length ? `Skipped, price would be too low (${cheap.length}): ${cheap.map((r) => `${r.name} ${r.sellAt}p vs median ${r.medianSell}p`).join(', ')}` : '',
-  ].filter(Boolean).join('\n\n');
-  if (!changes.length) { setStatus('All listings are already at their price.' + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
-  if (!confirm(`Change the price of ${changes.length} listing${changes.length === 1 ? '' : 's'}?\n\n`
-    + changes.slice(0, 20).map((r) => `${r.name}: ${r.listing.platinum}p → ${r.sellAt}p`).join('\n') + (changes.length > 20 ? `\n…and ${changes.length - 20} more` : '')
+  const skipped = skippedText([
+    [t('Kept your own "Sell at" price'), own, (r) => `${r.name} ${r.e.price}p`],
+    [t('No other seller online'), alone, (r) => r.name],
+    [t('Skipped, price would be too low'), cheap, (r) => t('{name} {price}p vs median {median}p', { name: r.name, price: r.sellAt, median: r.medianSell })],
+  ]);
+  if (!changes.length) { setStatus(t('All listings are already at their price.') + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
+  if (!confirm(`${t('Change the price of {n} listings?', { n: changes.length })}\n\n`
+    + changes.slice(0, 20).map((r) => `${r.name}: ${r.listing.platinum}p → ${r.sellAt}p`).join('\n')
+    + (changes.length > 20 ? `\n${t('…and {n} more', { n: changes.length - 20 })}` : '')
     + (skipped ? `\n\n${skipped}` : ''))) return;
-  await bulkUpdate(changes, (r) => ({ platinum: r.sellAt }), 'Repricing', (n) => `Repriced ${n} listing${n === 1 ? '' : 's'}.`);
+  await bulkUpdate(changes, (r) => ({ platinum: r.sellAt }), t('Repricing'), (n) => t('Repriced {n} listings.', { n }));
 }
 
 async function setAllVisible(visible) {
   if (!requireAuth()) return;
   const rows = filteredRows().filter((r) => r.listing && !r.e.gone && (r.listing.visible !== false) !== visible);
-  if (!rows.length) { setStatus(visible ? 'All your listings are already visible.' : 'All your listings are already hidden.'); return; }
-  await bulkUpdate(rows, () => ({ visible }), visible ? 'Showing' : 'Hiding', (n) => `${visible ? 'Showing' : 'Hid'} ${n} listing${n === 1 ? '' : 's'}.`);
+  if (!rows.length) { setStatus(visible ? t('All your listings are already visible.') : t('All your listings are already hidden.')); return; }
+  await bulkUpdate(rows, () => ({ visible }), visible ? t('Showing') : t('Hiding'),
+    (n) => (visible ? t('Showing {n} listings again.', { n }) : t('Hid {n} listings.', { n })));
 }
 
 // Changes listings one after another (the API allows a few requests per second), then reloads them.
@@ -471,12 +591,12 @@ async function bulkUpdate(rows, patch, verb, done) {
   const failed = [];
   try {
     for (const r of rows) {
-      setStatus(`${verb} ${ok + failed.length + 1} of ${rows.length}: ${r.name}`);
+      setStatus(t('{action} {i} of {n}: {name}', { action: verb, i: ok + failed.length + 1, n: rows.length, name: r.name }));
       try {
         await Backend.updateOrder(r.listing.id, patch(r));
         ok++;
       } catch (err) {
-        failed.push(`${r.name} (${err.message})`);
+        failed.push(`${r.name} (${errText(err)})`);
         if (err.status === 401) { await loadAuth(); break; }
       }
     }
@@ -484,7 +604,7 @@ async function bulkUpdate(rows, patch, verb, done) {
     buttons.forEach((b) => { b.disabled = false; });
   }
   await loadListings(true);
-  setStatus(done(ok) + (failed.length ? ` Failed: ${failed.join('; ')}` : ''));
+  setStatus(done(ok) + (failed.length ? ' ' + t('Failed: {list}', { list: failed.join('; ') }) : ''));
 }
 
 async function listAllUnlisted() {
@@ -500,31 +620,33 @@ async function listAllUnlisted() {
   const needRank = unlisted.filter((r) => !r.rankKnown);
   const cheap = unlisted.filter((r) => r.rankKnown && underpriced(r));
   const rows = unlisted.filter((r) => r.rankKnown && r.sellAt && !underpriced(r));
-  const skipped = [
-    needRank.length ? `Skipped, rank not set (${needRank.length}): ${needRank.map((r) => r.name).join(', ')}` : '',
-    cheap.length ? `Skipped, price looks too low (${cheap.length}): ${cheap.map((r) => `${r.name} ${r.sellAt}p vs median ${r.medianSell}p`).join(', ')}. List these one by one if you mean it.` : '',
-  ].filter(Boolean).join('\n\n');
-  if (!rows.length) { setStatus('Nothing to list.' + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
+  let skipped = skippedText([
+    [t('Skipped, rank not set'), needRank, (r) => r.name],
+    [t('Skipped, price looks too low'), cheap, (r) => t('{name} {price}p vs median {median}p', { name: r.name, price: r.sellAt, median: r.medianSell })],
+  ]);
+  if (cheap.length) skipped += ' ' + t('List these one by one if you mean it.');
+  if (!rows.length) { setStatus(t('Nothing to list.') + (skipped ? ' ' + skipped.replace(/\n\n/g, ' ') : '')); return; }
   const total = rows.reduce((s, r) => s + r.sellAt * listQtyOf(r.e), 0);
-  if (!confirm(`List ${rows.length} items on warframe.market for ${total.toLocaleString()}p in total?\n\n`
-    + rows.slice(0, 15).map((r) => `${listQtyOf(r.e)}× ${r.name}: ${r.sellAt}p`).join('\n') + (rows.length > 15 ? `\n…and ${rows.length - 15} more` : '')
+  if (!confirm(`${t('List {n} items on warframe.market for {total}p in total?', { n: rows.length, total: total.toLocaleString() })}\n\n`
+    + rows.slice(0, 15).map((r) => `${listQtyOf(r.e)}× ${r.name}: ${r.sellAt}p`).join('\n')
+    + (rows.length > 15 ? `\n${t('…and {n} more', { n: rows.length - 15 })}` : '')
     + (skipped ? `\n\n${skipped}` : ''))) return;
   $('#listAllBtn').disabled = true;
   let ok = 0;
   const failed = [];
   for (const r of rows) {
-    setStatus(`Listing ${ok + failed.length + 1} of ${rows.length}: ${r.name}`);
+    setStatus(t('{action} {i} of {n}: {name}', { action: t('Listing'), i: ok + failed.length + 1, n: rows.length, name: r.name }));
     try {
       await Backend.createOrder({ slug: r.e.slug, platinum: r.sellAt, quantity: listQtyOf(r.e), rank: r.e.rank, subtype: r.e.subtype });
       ok++;
     } catch (err) {
-      failed.push(`${r.name} (${err.message})`);
+      failed.push(`${r.name} (${errText(err)})`);
       if (err.status === 401) { await loadAuth(); break; }
     }
   }
   $('#listAllBtn').disabled = false;
   await loadListings(true);
-  setStatus(`Listed ${ok} items.` + (failed.length ? ` Failed: ${failed.join('; ')}` : ''));
+  setStatus(t('Listed {n} items.', { n: ok }) + (failed.length ? ' ' + t('Failed: {list}', { list: failed.join('; ') }) : ''));
 }
 
 // ---------- sales history ----------
@@ -538,25 +660,25 @@ function recordSales(sales) {
   const stamped = sales.map((s) => ({ ...s, at: new Date().toISOString() }));
   state.sales.push(...stamped);
   renderSales();
-  Backend.addSales(stamped).catch((err) => setStatus('Could not save sale: ' + err.message));
+  Backend.addSales(stamped).catch((err) => setStatus(t('Could not save sale: {error}', { error: errText(err) })));
 }
 
 function renderSales() {
   const total = state.sales.reduce((s, x) => s + (x.platinum ?? 0) * x.qty, 0);
   const ducats = state.sales.reduce((s, x) => s + (x.platinum ? 0 : (x.ducats ?? 0) * x.qty), 0);
   $('#salesSummary').textContent = state.sales.length
-    ? `${state.sales.length} sales · ${total.toLocaleString()}p${ducats ? ` · ${ducats.toLocaleString()} ducats` : ''}`
-    : 'nothing sold yet';
+    ? [t('{n} sales', { n: state.sales.length }), `${total.toLocaleString()}p`, ducats ? t('{n} ducats', { n: ducats }) : ''].filter(Boolean).join(' · ')
+    : t('nothing sold yet');
   // Trades to Baro Ki'Teer earned ducats instead of platinum.
   const amount = (s, n, tag) => (s.platinum ? plat(s.platinum * n, tag)
-    : s.ducats ? h(tag, { class: 'ducats', title: 'Ducats' }, `${(s.ducats * n).toLocaleString()} d`) : dash());
+    : s.ducats ? h(tag, { class: 'ducats', title: t('Ducats') }, t('{n} ducats', { n: s.ducats * n })) : dash());
   fill($('#salesTable tbody'), [...state.sales].reverse().map((s) => h('tr', null,
     h('td', { class: 'muted' }, new Date(s.at).toLocaleString()),
-    h('td', null, s.name ?? s.slug),
+    h('td', null, state.bySlug.has(s.slug) ? itemName(state.bySlug.get(s.slug)) : s.name ?? s.slug),
     h('td', { class: 'r' }, s.qty),
     h('td', { class: 'r' }, amount(s, 1, 'span')),
     h('td', { class: 'r' }, amount(s, s.qty, 'b')),
-    h('td', { class: 'muted' }, s.how ?? ''))));
+    h('td', { class: 'muted' }, s.how ? t(s.how) : ''))));
 }
 
 // ---------- table ----------
@@ -570,14 +692,18 @@ function buildRow(e) {
   const me = state.auth.user?.slug;
   const others = price?.sellOrders?.filter((o) => !me || o.user !== me).map((o) => o.platinum);
   const lowestOther = others ? (others.length ? Math.min(...others) : null) : lowest;
+  const hist = history(e);
   return {
     e, item, price, listing,
     key: rowKey(e),
-    name: item.name,
+    name: itemName(item),
     category: category(item),
     qty: e.qty,
     lowestSell: lowest,
     lowestOther,
+    hist,
+    avg7: hist?.avg ?? null,
+    perDay: hist ? hist.perDay : null,
     medianSell: price?.medianSell ?? null,
     bestBuy: price?.bestBuy ?? null,
     value: lowest !== null ? lowest * e.qty : null,
@@ -591,13 +717,18 @@ function buildRow(e) {
 
 // A price far under what online sellers typically ask is usually a mistake, or undercutting someone's
 // troll listing (a 1p offer drags "lowest online" down with it).
+// Recent trades catch it too when the live price itself has been dragged down.
 function underpriced(r) {
-  const median = r.medianSell;
-  if (!r.sellAt || !median || (r.price?.sellers ?? 0) < 3) return false;
-  return r.sellAt < median * 0.6 && median - r.sellAt >= 3;
+  if (!r.sellAt) return false;
+  const far = (ref) => r.sellAt < ref * 0.6 && ref - r.sellAt >= 3;
+  const vsOnline = r.medianSell && (r.price?.sellers ?? 0) >= 3 && far(r.medianSell);
+  const vsHistory = r.avg7 && r.hist.trades >= 5 && far(r.avg7);
+  return !!(vsOnline || vsHistory);
 }
 
-const underpricedText = (r) => `${r.name}: ${r.sellAt}p is far below what online sellers ask (median ${r.medianSell}p, cheapest ${r.lowestSell}p).`;
+const underpricedText = (r) => t('{name}: {price}p is far below what it sells for (online median {median}p, cheapest {lowest}p).',
+  { name: r.name, price: r.sellAt, median: r.medianSell ?? '?', lowest: r.lowestSell ?? '?' })
+  + (r.avg7 ? ' ' + t('7-day average: {avg}p from {n} trades.', { avg: r.avg7, n: r.hist.trades }) : '');
 
 // Listing uses the newest prices: anything older than a few minutes is fetched again first.
 const LIST_FRESH_MS = 5 * 60 * 1000;
@@ -607,7 +738,7 @@ async function ensureFreshPrices(entries) {
     return !p?.fetchedAt || Date.now() - p.fetchedAt > LIST_FRESH_MS;
   });
   if (!stale.length) return;
-  setStatus(`Checking current prices for ${stale.length} item${stale.length === 1 ? '' : 's'}…`);
+  setStatus(t('Checking current prices for {n} items…', { n: stale.length }));
   await fetchPrices(stale, { refetch: true, force: true });
 }
 
@@ -619,7 +750,7 @@ function filteredRows() {
   const { col, dir } = state.sort;
   return state.inventory.map(buildRow)
     .filter((r) => (!cat || r.category === cat)
-      && (!text || r.name.toLowerCase().includes(text))
+      && (!text || r.name.toLowerCase().includes(text) || r.item.name.toLowerCase().includes(text))
       && (min === 0 || (r.lowestSell ?? 0) >= min)
       && (minDpp === 0 || (r.dpp ?? 0) >= minDpp))
     .sort((a, b) => {
@@ -637,47 +768,57 @@ function rankCell(r) {
     const attrs = { class: 'num', type: 'number', min: 0, max: item.maxRank, 'data-field': 'rank' };
     if (!r.rankKnown) {
       return h('input', { ...attrs, class: 'num needs-rank', value: '', placeholder: '?',
-        title: `Rank unknown (screenshots don't show it). Enter 0–${item.maxRank} before listing.` });
+        title: t("Rank unknown (screenshots don't show it). Enter 0–{max} before listing.", { max: item.maxRank }) });
     }
     return h('input', { ...attrs, value: e.rank, title: `0–${item.maxRank}` });
   }
-  if (item.subtypes) return h('select', { 'data-field': 'subtype' }, item.subtypes.map((s) => h('option', { selected: s === e.subtype }, s)));
+  if (item.subtypes) return h('select', { 'data-field': 'subtype' }, item.subtypes.map((s) => h('option', { value: s, selected: s === e.subtype }, t(s))));
   return dash();
 }
 
 function priceCell(r, field) {
   const loading = state.loadingPrices.has(r.key);
   if (loading && !r.price?.fetchedAt) return h('span', { class: 'muted' }, '…');
-  if (r.price?.error) return field === 'lowestSell' ? h('span', { class: 'bad', title: r.price.error }, 'error') : null;
+  if (r.price?.error) return field === 'lowestSell' ? h('span', { class: 'bad', title: r.price.error }, t('error')) : null;
   const v = r[field];
   const stale = r.price && isStale(r.price);
-  const title = r.price?.fetchedAt ? `Fetched ${ago(r.price.fetchedAt)}` : null;
-  if (v === null && field === 'lowestSell' && r.price?.sellers === 0) return h('span', { class: 'muted', title: `No online sellers right now. ${title ?? ''}` }, 'none online');
+  const title = r.price?.fetchedAt ? t('Fetched {ago}', { ago: ago(r.price.fetchedAt) }) : null;
+  if (v === null && field === 'lowestSell' && r.price?.sellers === 0) return h('span', { class: 'muted', title: `${t('No online sellers right now.')} ${title ?? ''}` }, t('none online'));
   if (v === null) return dash();
-  if (!r.rankKnown) return h('span', { class: 'plat stale', title: 'Price at rank 0. Set the rank to see the right price.' }, v);
+  if (!r.rankKnown) return h('span', { class: 'plat stale', title: t('Price at rank 0. Set the rank to see the right price.') }, v);
   return h('span', { class: `plat${stale || loading ? ' stale' : ''}`, title }, v);
+}
+
+function historyCell(r, field) {
+  if (!r.hist) return state.loadingStats.has(r.e.slug) ? h('span', { class: 'muted' }, '…') : dash();
+  const title = t('{n} traded in the last 7 days', { n: r.hist.trades });
+  if (field === 'perDay') return h('span', { title }, r.perDay >= 1 || r.perDay === 0 ? Math.round(r.perDay) : r.perDay.toFixed(1));
+  if (r.avg7 === null) return h('span', { class: 'muted', title: t('No trades in the last 7 days') }, '—');
+  return h('span', { class: r.rankKnown ? 'plat' : 'plat stale', title: r.rankKnown ? title : t('At rank 0. Set the rank to see the right history.') }, r.avg7);
 }
 
 function listingCell(r) {
   const { e, listing } = r;
   const busy = state.busyRows.has(r.key);
   const button = (action, label, attrs) => h('button', { class: 'small', 'data-action': action, ...attrs }, label);
-  const sold = button('sold', 'Sold', { class: 'small secondary', disabled: busy,
-    title: `Remove sold items from your list${listing && state.auth.connected ? ' and close the order on warframe.market' : ''}` });
-  const baro = r.ducats > 0 && button('baro', 'Baro', { class: 'small secondary',
-    title: `Traded to Baro Ki'Teer for ${r.ducats} ducats each: removes them from your list${listing ? ' and lowers the listing' : ''}` });
+  const sold = button('sold', t('Sold'), { class: 'small secondary', disabled: busy,
+    title: listing && state.auth.connected ? t('Remove sold items from your list and close the order on warframe.market') : t('Remove sold items from your list') });
+  const split = r.category === 'Prime Set' && button('split', t('Split'), { class: 'small secondary', title: t('Turn this set back into its parts in your list') });
+  const baro = r.ducats > 0 && button('baro', t('Baro'), { class: 'small secondary',
+    title: listing ? t("Traded to Baro Ki'Teer for {n} ducats each: removes them from your list and lowers the listing", { n: r.ducats })
+      : t("Traded to Baro Ki'Teer for {n} ducats each: removes them from your list", { n: r.ducats }) });
 
   if (e.gone) {
     return h('div', { class: 'actions' },
-      h('span', { class: 'bad', title: `This listing (${e.gone.quantity}× at ${e.gone.platinum}p) is no longer on warframe.market` }, 'Listing gone. Sold?'),
-      button('gone-sold', 'Yes, sold'),
-      button('gone-keep', 'No', { class: 'small secondary' }));
+      h('span', { class: 'bad', title: t('This listing ({qty}× at {price}p) is no longer on warframe.market', { qty: e.gone.quantity, price: e.gone.platinum }) }, t('Listing gone. Sold?')),
+      button('gone-sold', t('Yes, sold')),
+      button('gone-keep', t('No'), { class: 'small secondary' }));
   }
-  if (busy) return h('span', { class: 'muted' }, 'working…');
+  if (busy) return h('span', { class: 'muted' }, t('working…'));
 
   if (!listing) {
-    const title = !r.rankKnown ? 'Set the rank first' : state.auth.connected ? `List ${listQtyOf(e)}× at ${r.sellAt ?? '?'}p` : 'Log in on warframe.market to list';
-    return h('div', { class: 'actions' }, dash(), button('list', 'List', { disabled: !(r.sellAt && r.rankKnown), title }), sold, baro);
+    const title = !r.rankKnown ? t('Set the rank first') : state.auth.connected ? t('List {qty}× at {price}p', { qty: listQtyOf(e), price: r.sellAt ?? '?' }) : t('Log in on warframe.market to list');
+    return h('div', { class: 'actions' }, dash(), button('list', t('List'), { disabled: !(r.sellAt && r.rankKnown), title }), sold, baro, split);
   }
 
   const above = r.lowestOther !== null && listing.platinum > r.lowestOther;
@@ -685,33 +826,35 @@ function listingCell(r) {
   const hidden = listing.visible === false;
   return h('div', { class: 'actions' },
     h('span', { class: hidden ? 'muted' : above ? 'bad' : 'good',
-      title: hidden ? 'Hidden: still listed, but nobody sees it' : above ? 'Priced above the cheapest other online seller' : 'Competitive' },
-      `${listing.platinum}p ×${listing.quantity}${hidden ? ' (hidden)' : ''}`),
-    state.auth.connected && changed && button('update', 'Update', { title: `Change listing to ${listQtyOf(e)}× at ${r.sellAt}p` }),
-    state.auth.connected && button('toggle-visible', hidden ? 'Show' : 'Hide', { class: 'small secondary',
-      title: hidden ? 'Make this listing visible on warframe.market again' : 'Keep the listing but hide it from buyers' }),
-    state.auth.connected && button('unlist', 'Unlist', { class: 'small secondary' }),
-    sold, baro);
+      title: hidden ? t('Hidden: still listed, but nobody sees it') : above ? t('Priced above the cheapest other online seller') : t('Competitive') },
+      `${listing.platinum}p ×${listing.quantity}${hidden ? ` (${t('hidden')})` : ''}`),
+    state.auth.connected && changed && button('update', t('Update'), { title: t('Change listing to {qty}× at {price}p', { qty: listQtyOf(e), price: r.sellAt }) }),
+    state.auth.connected && button('toggle-visible', hidden ? t('Show') : t('Hide'), { class: 'small secondary',
+      title: hidden ? t('Make this listing visible on warframe.market again') : t('Keep the listing but hide it from buyers') }),
+    state.auth.connected && button('unlist', t('Unlist'), { class: 'small secondary' }),
+    sold, baro, split);
 }
 
-// Both item tables (not listed / listed) share these columns.
+// Both item tables (not listed / listed) share these columns. Labels are translated when the header is built.
 const COLUMNS = [
-  { label: 'Item', sort: 'name' },
-  { label: 'Qty', sort: 'qty', right: true, title: 'How many you own' },
-  { label: 'Rank / Ref.', right: true },
-  { label: 'Lowest sell', sort: 'lowestSell', right: true, title: 'Cheapest seller who is online right now' },
-  { label: 'Median', sort: 'medianSell', right: true, title: 'Median of the 5 cheapest online sellers' },
-  { label: 'Best buy', sort: 'bestBuy', right: true, title: 'Highest buy order from an online player — instant sale' },
-  { label: 'Value', sort: 'value', right: true, title: 'Lowest sell × quantity' },
-  { label: 'Ducats', sort: 'ducats', right: true },
-  { label: 'D/P', sort: 'dpp', right: true, title: "Ducats per platinum: high = better to sell to Baro Ki'Teer" },
-  { label: 'Sell at', sort: 'sellAt', right: true, title: "Your listing price. Leave empty to use the default (lowest online minus undercut)." },
-  { label: 'List qty', right: true, title: 'How many to put on the market. Leave empty to list all you own.' },
-  { label: 'Listing', sort: 'listed' },
+  { label: tk('Item'), sort: 'name' },
+  { label: tk('Qty'), sort: 'qty', right: true, title: tk('How many you own') },
+  { label: tk('Rank / Ref.'), right: true },
+  { label: tk('Lowest sell'), sort: 'lowestSell', right: true, title: tk('Cheapest seller who is online right now') },
+  { label: tk('Median'), sort: 'medianSell', right: true, title: tk('Median of the 5 cheapest online sellers') },
+  { label: tk('7-day avg'), sort: 'avg7', right: true, title: tk('Average price of completed trades over the last 7 days') },
+  { label: tk('Sold/day'), sort: 'perDay', right: true, title: tk('How many were traded per day over the last 7 days: how fast it sells') },
+  { label: tk('Best buy'), sort: 'bestBuy', right: true, title: tk('Highest buy order from an online player — instant sale') },
+  { label: tk('Value'), sort: 'value', right: true, title: tk('Lowest sell × quantity') },
+  { label: tk('Ducats'), sort: 'ducats', right: true },
+  { label: tk('D/P'), sort: 'dpp', right: true, title: tk("Ducats per platinum: high = better to sell to Baro Ki'Teer") },
+  { label: tk('Sell at'), sort: 'sellAt', right: true, title: tk('Your listing price. Leave empty to use the default (cheapest other online seller minus undercut).') },
+  { label: tk('List qty'), right: true, title: tk('How many to put on the market. Leave empty to list all you own.') },
+  { label: tk('Listing'), sort: 'listed' },
   { label: '' },
 ];
 
-const tableHeader = () => h('tr', null, COLUMNS.map((c) => h('th', { 'data-sort': c.sort, class: c.right ? 'r' : null, title: c.title }, c.label)));
+const tableHeader = () => h('tr', null, COLUMNS.map((c) => h('th', { 'data-sort': c.sort, class: c.right ? 'r' : null, title: c.title ? t(c.title) : null }, c.label ? t(c.label) : '')));
 
 function rowEl(r) {
   const { e, item } = r;
@@ -720,31 +863,33 @@ function rowEl(r) {
   return h('tr', { 'data-key': r.key, class: e.gone ? 'gone' : null },
     h('td', null, h('div', { class: 'item' },
       item.thumb ? h('img', { src: ASSETS + item.thumb, alt: '', loading: 'lazy' }) : h('span', { class: 'thumb-missing' }),
-      h('a', { href: `https://warframe.market/items/${encodeURIComponent(e.slug)}`, target: '_blank', rel: 'noopener', title: r.name }, r.name),
-      item.vaulted && h('span', { class: 'tag' }, 'vaulted'))),
+      h('a', { href: `https://warframe.market/items/${encodeURIComponent(e.slug)}`, target: '_blank', rel: 'noopener', title: r.name === item.name ? r.name : `${r.name} (${item.name})` }, r.name),
+      item.vaulted && h('span', { class: 'tag' }, t('vaulted')))),
     cell(h('input', { class: 'num', type: 'number', min: 1, value: r.qty, 'data-field': 'qty' })),
     cell(rankCell(r)),
     cell(priceCell(r, 'lowestSell')),
     cell(priceCell(r, 'medianSell')),
+    cell(historyCell(r, 'avg')),
+    cell(historyCell(r, 'perDay')),
     cell(priceCell(r, 'bestBuy')),
     cell(r.value === null ? dash() : plat(r.value, 'b')),
     cell(fmt(r.ducats)),
     cell(r.dpp === null ? dash() : r.dpp.toFixed(1)),
     cell(h('input', { class: `num price-input${e.price ? ' custom' : ''}${tooLow ? ' too-low' : ''}`, type: 'number', min: 1, 'data-field': 'price',
-      value: e.price ?? '', placeholder: defaultPrice(r.lowestOther) ?? '', title: tooLow ? underpricedText(r) : 'Empty = cheapest other online seller − undercut' })),
+      value: e.price ?? '', placeholder: defaultPrice(r.lowestOther) ?? '', title: tooLow ? underpricedText(r) : t('Empty = cheapest other online seller − undercut') })),
     cell(h('input', { class: `num${e.listQty ? ' custom' : ''}`, type: 'number', min: 1, max: r.qty, 'data-field': 'listQty',
-      value: e.listQty ?? '', placeholder: r.qty, title: `Empty = all ${r.qty}` })),
+      value: e.listQty ?? '', placeholder: r.qty, title: t('Empty = all {n}', { n: r.qty }) })),
     h('td', null, listingCell(r)),
-    h('td', null, h('button', { class: 'icon', 'data-action': 'remove', title: 'Remove from list' }, '✕')));
+    h('td', null, h('button', { class: 'icon', 'data-action': 'remove', title: t('Remove from list') }, '✕')));
 }
 
 // Each table is split into foldable groups by item type; empty groups are left out.
 const GROUPS = [
-  { key: 'prime', label: 'Prime parts & sets', categories: ['Prime Part', 'Prime Set'] },
-  { key: 'mod', label: 'Mods', categories: ['Mod'] },
-  { key: 'arcane', label: 'Arcanes', categories: ['Arcane'] },
-  { key: 'relic', label: 'Relics', categories: ['Relic'] },
-  { key: 'other', label: 'Other', categories: ['Other'] },
+  { key: 'prime', label: tk('Prime parts & sets'), categories: ['Prime Part', 'Prime Set'] },
+  { key: 'mod', label: tk('Mods'), categories: ['Mod'] },
+  { key: 'arcane', label: tk('Arcanes'), categories: ['Arcane'] },
+  { key: 'relic', label: tk('Relics'), categories: ['Relic'] },
+  { key: 'other', label: tk('Other'), categories: ['Other'] },
 ];
 
 const foldedGroups = new Set(JSON.parse(storageGet('foldedGroups', '[]')));
@@ -759,8 +904,8 @@ function renderGroups(table, rows) {
     table.append(h('tbody', { class: `group${foldedGroups.has(id) ? ' folded' : ''}`, 'data-group': id },
       h('tr', { class: 'group-head', 'data-action': 'toggle-group' }, h('td', { colspan: COLUMNS.length },
         h('span', { class: 'arrow' }),
-        h('b', null, g.label),
-        h('span', { class: 'count' }, `${groupRows.length} item${groupRows.length === 1 ? '' : 's'} · ${value.toLocaleString()}p`))),
+        h('b', null, t(g.label)),
+        h('span', { class: 'count' }, `${t('{n} items', { n: groupRows.length })} · ${value.toLocaleString()}p`))),
       groupRows.map(rowEl)));
   }
 }
@@ -772,8 +917,8 @@ function render() {
   const unlisted = rows.filter((r) => !r.listing && !r.e.gone);
   renderGroups($('#tableListed'), listed);
   renderGroups($('#tableUnlisted'), unlisted);
-  $('[data-count=listed]').textContent = `${listed.length} item${listed.length === 1 ? '' : 's'}`;
-  $('[data-count=unlisted]').textContent = `${unlisted.length} item${unlisted.length === 1 ? '' : 's'}`;
+  $('[data-count=listed]').textContent = t('{n} items', { n: listed.length });
+  $('[data-count=unlisted]').textContent = t('{n} items', { n: unlisted.length });
   $('#listedSection').hidden = listed.length === 0;
   $('#unlistedSection').hidden = unlisted.length === 0;
 
@@ -791,31 +936,31 @@ function render() {
   const rankNeeded = unlisted.filter((r) => !r.rankKnown).length;
   const stat = (label, value, attrs) => h('span', attrs, `${label} `, value instanceof Node ? value : h('b', null, value));
   fill($('#summary'),
-    stat('Rows', rows.length),
-    stat('Items', totalQty),
-    stat('Market value', plat(`${totalPlat.toLocaleString()}p`, 'b')),
-    stat('Ducats', totalDucats.toLocaleString()),
-    stat('Not listed yet', unlisted.length),
-    rankNeeded > 0 && stat('Rank needed', rankNeeded, { class: 'bad', title: "Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing" }));
-  $('#listAllBtn').textContent = listable ? `List all unlisted (${listable})` : 'List all unlisted';
+    stat(t('Rows'), rows.length),
+    stat(t('Items'), totalQty),
+    stat(t('Market value'), plat(`${totalPlat.toLocaleString()}p`, 'b')),
+    stat(t('Ducats'), totalDucats.toLocaleString()),
+    stat(t('Not listed yet'), unlisted.length),
+    rankNeeded > 0 && stat(t('Rank needed'), rankNeeded, { class: 'bad', title: t("Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing") }));
+  $('#listAllBtn').textContent = listable ? `${t('List all unlisted')} (${listable})` : t('List all unlisted');
   const repriceable = repriceTargets(listed).changes.length;
-  $('#repriceBtn').textContent = repriceable ? `Reprice listings (${repriceable})` : 'Reprice listings';
+  $('#repriceBtn').textContent = repriceable ? `${t('Reprice listings')} (${repriceable})` : t('Reprice listings');
 
   const gone = state.inventory.filter((e) => e.gone).length;
   $('#goneBanner').hidden = gone === 0;
-  $('#goneBanner').textContent = `${gone} of your listings disappeared from warframe.market without this add-on removing them. `
-    + 'If you sold them, click "Yes, sold" on the row to remove them from your list.';
+  $('#goneBanner').textContent = t('{n} of your listings disappeared from warframe.market without this add-on removing them. If you sold them, click "Yes, sold" on the row to remove them from your list.', { n: gone });
 
   const fetched = state.inventory.map((e) => state.prices.get(rowKey(e))?.fetchedAt).filter(Boolean);
-  $('#priceAge').textContent = fetched.length ? `Oldest price: ${ago(Math.min(...fetched))}` : '';
+  $('#priceAge').textContent = fetched.length ? t('Oldest price: {ago}', { ago: ago(Math.min(...fetched)) }) : '';
 
   renderTradeMessage(rows);
 }
 
+// Trade chat is shared by players of every language, so the message uses the English item names.
 function renderTradeMessage(rows) {
   const parts = rows
     .filter((r) => r.sellAt && r.rankKnown) // a rank-unknown price is the rank 0 price
-    .map((r) => `[${r.name}]${r.e.rank ? ` r${r.e.rank}` : ''}${r.e.subtype && r.category === 'Relic' ? ` ${r.e.subtype}` : ''} ${r.sellAt}p`);
+    .map((r) => `[${r.item.name}]${r.e.rank ? ` r${r.e.rank}` : ''}${r.e.subtype && r.category === 'Relic' ? ` ${r.e.subtype}` : ''} ${r.sellAt}p`);
   const messages = [];
   let current = 'WTS';
   for (const p of parts) {
@@ -860,15 +1005,17 @@ async function computeSets() {
     const partsTotal = partPrices.includes(null) ? null : s.parts.reduce((sum, p, i) => sum + partPrices[i] * p.quantityInSet, 0);
     let better = dash();
     if (setPrice !== null && partsTotal !== null) {
-      better = h('span', { class: 'good' }, setPrice >= partsTotal ? `Set (+${setPrice - partsTotal}p)` : `Parts (+${partsTotal - setPrice}p)`);
+      better = h('span', { class: 'good' }, setPrice >= partsTotal ? t('Set (+{n}p)', { n: setPrice - partsTotal }) : t('Parts (+{n}p)', { n: partsTotal - setPrice }));
     }
     const item = state.bySlug.get(s.setSlug);
     return h('tr', null,
-      h('td', null, h('a', { href: `https://warframe.market/items/${encodeURIComponent(s.setSlug)}`, target: '_blank', rel: 'noopener' }, item ? item.name : s.setSlug)),
+      h('td', null, h('a', { href: `https://warframe.market/items/${encodeURIComponent(s.setSlug)}`, target: '_blank', rel: 'noopener' }, item ? itemName(item) : s.setSlug)),
       h('td', { class: 'r' }, s.count),
       h('td', { class: 'r' }, setPrice === null ? dash() : plat(setPrice)),
       h('td', { class: 'r' }, partsTotal === null ? dash() : plat(partsTotal)),
-      h('td', { class: 'r' }, better));
+      h('td', { class: 'r' }, better),
+      h('td', null, h('button', { class: 'small', 'data-action': 'combine', 'data-set': s.setSlug,
+        title: t('Turn the parts into one set row you can list. Split undoes it.') }, t('Combine'))));
   }));
 }
 
@@ -881,22 +1028,70 @@ async function exportBackup() {
   const a = Object.assign(document.createElement('a'), { href: url, download: `tenno-trade-helper-backup-${new Date().toISOString().slice(0, 10)}.json` });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  $('#backupResult').textContent = `Saved ${data.inventory.length} items and ${data.sales.length} sales.`;
+  $('#backupResult').textContent = t('Saved {items} items and {sales} sales.', { items: data.inventory.length, sales: data.sales.length });
 }
 
 async function importBackup(file) {
   try {
     const data = JSON.parse(await file.text());
-    if (!confirm('Replace what is in this browser with the contents of this file? Anything not in the file is lost.')) return;
+    if (!confirm(t('Replace what is in this browser with the contents of this file? Anything not in the file is lost.'))) return;
     await saveChain;
     const res = await Backend.importData(data);
     await reloadInventory();
     await loadSales();
     render();
     fetchPrices(state.inventory).then(computeSets);
-    $('#backupResult').textContent = `Loaded ${res.inventory} items and ${res.sales} sales.`;
+    $('#backupResult').textContent = t('Loaded {items} items and {sales} sales.', { items: res.inventory, sales: res.sales });
   } catch (err) {
-    $('#backupResult').textContent = 'Could not load that file: ' + err.message;
+    $('#backupResult').textContent = t('Could not load that file: {error}', { error: errText(err) });
+  }
+}
+
+// ---------- page language ----------
+
+// Item names in the page language come from warframe.market (cached for a day).
+async function loadNames() {
+  state.names = null;
+  state.byLocalName.clear();
+  if (pageLangCode() !== 'en') {
+    try {
+      state.names = await Backend.getItemNames(pageLangCode());
+      for (const [slug, name] of Object.entries(state.names)) {
+        if (state.bySlug.has(slug)) state.byLocalName.set(name.toLowerCase(), state.bySlug.get(slug));
+      }
+    } catch { /* English names until they load */ }
+  }
+  fill($('#itemNames'), state.items
+    .filter((i) => !i.tags.includes('set') || i.tags.includes('prime'))
+    .map((i) => h('option', { value: itemName(i) })));
+}
+
+const pageLangCode = () => document.documentElement.dataset.lang || 'en';
+
+// Everything built from code is drawn again in the new language.
+function renderTexts() {
+  translatePage();
+  document.querySelectorAll('.item-section thead').forEach((thead) => fill(thead, tableHeader()));
+  const cat = $('#fCategory').value;
+  fill($('#fCategory'), h('option', { value: '' }, t('All categories')),
+    Object.entries(CATEGORY_LABELS).map(([value, label]) => h('option', { value }, t(label))));
+  $('#fCategory').value = cat;
+  renderAccount();
+  renderSales();
+  render();
+  computeSets();
+  if (typeof renderScanTexts === 'function') renderScanTexts(); // eslint-disable-line no-undef
+}
+
+async function changePageLang(lang) {
+  document.documentElement.dataset.lang = setPageLang(lang);
+  storageSet('pageLang', document.documentElement.dataset.lang);
+  await Backend.updateSettings({ pageLang: document.documentElement.dataset.lang });
+  renderTexts();
+  if (state.items.length) {
+    await loadNames();
+    render();
+    computeSets();
   }
 }
 
@@ -913,7 +1108,7 @@ function wireEvents() {
   $('#addForm').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const item = findItem($('#addName').value);
-    if (!item) { setStatus(`No market item matches "${$('#addName').value}"`); return; }
+    if (!item) { setStatus(t('No market item matches "{text}"', { text: $('#addName').value })); return; }
     addEntries([{ slug: item.slug, qty: $('#addQty').value, rank: $('#addRank').value, rankKnown: $('#addRank').value !== '' }]);
     $('#addName').value = '';
     $('#addQty').value = 1;
@@ -923,7 +1118,7 @@ function wireEvents() {
 
   $('#clearBtn').addEventListener('click', () => {
     // Listed items always show, so clearing removes only what isn't listed.
-    if (!confirm('Remove every item that is not listed on warframe.market? Listed items and your listings stay.')) return;
+    if (!confirm(t('Remove every item that is not listed on warframe.market? Listed items and your listings stay.'))) return;
     state.inventory = state.inventory.filter((e) => listingFor(e));
     saveInventory();
     render();
@@ -943,18 +1138,18 @@ function wireEvents() {
 
   // Two foldable item tables with the same columns; remember which ones you folded.
   for (const section of document.querySelectorAll('.item-section')) {
-    fill(section.querySelector('thead'), tableHeader());
     section.open = storageGet(`fold:${section.id}`, 'open') === 'open';
     section.addEventListener('toggle', () => storageSet(`fold:${section.id}`, section.open ? 'open' : 'closed'));
   }
-  document.querySelectorAll('table.items th[data-sort]').forEach((th) => th.addEventListener('click', () => {
-    const col = th.dataset.sort;
-    state.sort = state.sort.col === col ? { col, dir: -state.sort.dir } : { col, dir: col === 'name' || col === 'category' ? 1 : -1 };
-    render();
-  }));
 
-  // Row controls in both tables (on the table: its groups are rebuilt on every render).
+  // Row controls in both tables (on the table: its header and groups are rebuilt).
   for (const table of document.querySelectorAll('table.items')) {
+    table.querySelector('thead').addEventListener('click', (ev) => {
+      const col = ev.target.closest('th[data-sort]')?.dataset.sort;
+      if (!col) return;
+      state.sort = state.sort.col === col ? { col, dir: -state.sort.dir } : { col, dir: col === 'name' || col === 'category' ? 1 : -1 };
+      render();
+    });
     table.addEventListener('click', (ev) => {
       const head = ev.target.closest('tr.group-head');
       if (!head) return;
@@ -983,6 +1178,7 @@ function wireEvents() {
       if (action === 'unlist') unlistEntry(entry);
       if (action === 'sold') soldEntry(entry);
       if (action === 'baro') baroEntry(entry);
+      if (action === 'split') splitSet(entry);
       if (action === 'toggle-visible') toggleVisible(entry);
       if (action === 'gone-sold') soldEntry(entry, Math.min(entry.gone.quantity, entry.qty));
       if (action === 'gone-keep') { entry.gone = null; saveInventory(); render(); }
@@ -990,10 +1186,10 @@ function wireEvents() {
         const listing = listingFor(entry);
         if (listing) {
           // Listed items always show in the list, so removing the row means removing the listing too.
-          const name = state.bySlug.get(entry.slug).name;
-          if (!state.auth.connected) { setStatus(`${name} is listed on warframe.market. Log in to remove the listing first.`); return; }
-          if (!confirm(`${name} is listed on warframe.market. Remove the listing and the item from your list?`)) return;
-          await rowAction(entry, 'Unlist', () => Backend.deleteOrder(listing.id));
+          const name = itemName(state.bySlug.get(entry.slug));
+          if (!state.auth.connected) { setStatus(t('{name} is listed on warframe.market. Log in to remove the listing first.', { name })); return; }
+          if (!confirm(t('{name} is listed on warframe.market. Remove the listing and the item from your list?', { name }))) return;
+          await rowAction(entry, t('Unlist'), () => Backend.deleteOrder(listing.id));
           if (listingFor(entry)) return; // unlisting failed; the error is in the status line
         }
         state.inventory = state.inventory.filter((e) => e !== entry);
@@ -1004,6 +1200,7 @@ function wireEvents() {
   }
 
   $('#copyTrade').addEventListener('click', () => navigator.clipboard.writeText($('#tradeMsg').value));
+  $('#setsTable').addEventListener('click', (ev) => { if (ev.target.dataset.action === 'combine') combineSet(ev.target.dataset.set); });
 
   // Account: follows the warframe.market login in this browser.
   $('#accountBtn').addEventListener('click', openLoginPage);
@@ -1019,10 +1216,16 @@ function wireEvents() {
   $('#platform').addEventListener('change', async () => {
     await Backend.updateSettings({ platform: $('#platform').value });
     state.prices.clear();
+    state.stats.clear();
     render();
     await loadListings(true);
     fetchPrices(state.inventory).then(computeSets);
   });
+
+  const langSelect = $('#pageLang');
+  langSelect.append(...Object.entries(PAGE_LANGS).map(([code, label]) => h('option', { value: code }, label)));
+  langSelect.value = pageLangCode();
+  langSelect.addEventListener('change', () => changePageLang(langSelect.value));
 
   $('#exportBtn').addEventListener('click', exportBackup);
   $('#importBtn').addEventListener('click', () => $('#importFile').click());
@@ -1031,20 +1234,21 @@ function wireEvents() {
     ev.target.value = '';
   });
 
-  // Messages from the background script.
-  browser.runtime.onMessage.addListener((msg) => {
+  // Messages from the background script. The answer goes through sendResponse: Chrome and Edge ignore a
+  // returned promise.
+  browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'focus') {
       browser.tabs.getCurrent().then((tab) => {
         browser.tabs.update(tab.id, { active: true });
         browser.windows.update(tab.windowId, { focused: true });
       });
-      return Promise.resolve(true);
+      sendResponse(true);
     }
     if (msg?.type === 'check-orders') {
       loadListings(true);
-      return Promise.resolve(true);
+      sendResponse(true);
     }
-    return undefined;
+    return false;
   });
 }
 
@@ -1053,7 +1257,7 @@ function onLoginMaybeChanged() {
   clearTimeout(loginCheck);
   loginCheck = setTimeout(async () => {
     if (await loadAuth()) {
-      setStatus(state.auth.connected ? `Connected as ${state.auth.user.ingameName}.` : 'Logged out of warframe.market.');
+      setStatus(state.auth.connected ? t('Connected as {name}.', { name: state.auth.user.ingameName }) : t('Logged out of warframe.market.'));
       await loadListings(true);
     }
   }, 500);
@@ -1062,12 +1266,24 @@ function onLoginMaybeChanged() {
 // ---------- startup ----------
 
 async function init() {
+  // The language remembered on this page first (no flash of English), then the add-on's own setting.
+  document.documentElement.dataset.lang = setPageLang(storageGet('pageLang', guessLanguage()));
+  state.auth = { connected: false, user: null, reason: 'checking' };
   wireEvents();
+  renderTexts();
+  setStatus(t('Loading item database…'));
   try {
     state.settings = await Backend.getSettings();
     $('#platform').value = state.settings.platform;
+    if (state.settings.pageLang && state.settings.pageLang !== pageLangCode()) {
+      document.documentElement.dataset.lang = setPageLang(state.settings.pageLang);
+      $('#pageLang').value = pageLangCode();
+      renderTexts();
+    } else if (!state.settings.pageLang) {
+      await Backend.updateSettings({ pageLang: pageLangCode() }); // so notifications use it too
+    }
     await loadAuth();
-    if (state.auth.reason === 'no-access') { setStatus('Waiting for access to warframe.market.'); return; }
+    if (state.auth.reason === 'no-access') { setStatus(t('Waiting for access to warframe.market.')); return; }
 
     state.items = await Backend.getItems();
     for (const it of state.items) {
@@ -1075,21 +1291,19 @@ async function init() {
       state.byId.set(it.id, it);
       state.byName.set(it.name.toLowerCase(), it);
     }
-    fill($('#itemNames'), state.items
-      .filter((i) => !i.tags.includes('set') || i.tags.includes('prime'))
-      .map((i) => h('option', { value: i.name })));
-    $('#fCategory').append(...['Prime Part', 'Prime Set', 'Mod', 'Arcane', 'Relic', 'Other'].map((c) => h('option', null, c)));
+    await loadNames();
 
     await reloadInventory();
     await loadCachedPrices();
-    setStatus(`${state.items.length.toLocaleString()} market items loaded`);
+    await loadCachedStats();
+    setStatus(t('{n} market items loaded', { n: state.items.length.toLocaleString() }));
     render();
 
     await Promise.all([loadListings(), loadSales()]);
     await fetchPrices(state.inventory); // only the stale ones
     await computeSets();
   } catch (err) {
-    setStatus('Startup failed: ' + err.message);
+    setStatus(t('Startup failed: {error}', { error: errText(err) }));
   }
 }
 

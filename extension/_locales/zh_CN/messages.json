@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Tenno Trade Helper",
+    "description": "Name of the add-on (not translated)"
+  },
+  "extensionDescription": {
+    "message": "通过截图扫描你的 Warframe 物品，查看 warframe.market 实时价格，一键挂单或标记已售。",
+    "description": "Store and add-on manager description"
+  },
+  "actionTitle": {
+    "message": "打开 Tenno Trade Helper",
+    "description": "Tooltip of the toolbar button"
+  }
+}

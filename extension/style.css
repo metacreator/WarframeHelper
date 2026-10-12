@@ -31,7 +31,7 @@ header {
   gap: 16px;
   flex-wrap: wrap;
   padding: 20px 24px 8px;
-  max-width: 1400px;
+  max-width: 1680px;
   margin: 0 auto;
 }
 
@@ -40,7 +40,7 @@ h2 { margin: 0 0 10px; font-size: 16px; }
 .sub { margin: 2px 0 0; color: var(--muted); }
 .status { color: var(--muted); font-size: 13px; }
 
-main { max-width: 1400px; margin: 0 auto; padding: 8px 24px 40px; display: grid; gap: 16px; }
+main { max-width: 1680px; margin: 0 auto; padding: 8px 24px 40px; display: grid; gap: 16px; }
 
 .card {
   background: var(--panel);
@@ -153,6 +153,7 @@ td.ocr { max-width: 180px; overflow: hidden; text-overflow: ellipsis; font-size:
 .header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .account { display: flex; align-items: center; gap: 10px; }
 .account b { color: var(--accent); }
+.page-lang { display: inline-flex; align-items: center; gap: 4px; }
 h2.inline { display: inline; margin: 0; }
 summary h2.inline { font-size: 16px; color: var(--text); }
 .listbar { padding-top: 8px; border-top: 1px solid var(--border); }
@@ -196,7 +197,7 @@ td input.num::-webkit-outer-spin-button, td input.num::-webkit-inner-spin-button
 
 /* ---------- add-on ---------- */
 [hidden] { display: none !important; } /* keep "hidden" working on elements styled with display */
-.banner.access { max-width: 1400px; margin: 0 auto 8px; width: calc(100% - 48px); border-color: var(--accent); background: rgba(216, 180, 90, 0.08); display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.banner.access { max-width: 1680px; margin: 0 auto 8px; width: calc(100% - 48px); border-color: var(--accent); background: rgba(216, 180, 90, 0.08); display: flex; align-items: center; gap: 12px; justify-content: space-between; }
 #platform { padding: 4px 6px; }
 
 /* Foldable "not listed" / "listed" item sections */
@@ -218,20 +219,24 @@ tbody.group.folded tr.group-head .arrow::before { content: "▸"; }
 tbody.group.folded tr:not(.group-head) { display: none; }
 
 /* Same column widths in the "not listed" and "listed" tables, so they line up; the item name takes the rest */
-table.items { table-layout: fixed; min-width: 1280px; }
+table.items { table-layout: fixed; min-width: 1420px; }
 table.items th:nth-child(2) { width: 70px; }   /* qty */
 table.items th:nth-child(3) { width: 100px; }  /* rank / refinement */
 table.items th:nth-child(4) { width: 92px; }   /* lowest sell */
 table.items th:nth-child(5) { width: 66px; }   /* median */
-table.items th:nth-child(6) { width: 74px; }   /* best buy */
-table.items th:nth-child(7) { width: 66px; }   /* value */
-table.items th:nth-child(8) { width: 64px; }   /* ducats */
-table.items th:nth-child(9) { width: 48px; }   /* D/P */
-table.items th:nth-child(10) { width: 82px; }  /* sell at */
-table.items th:nth-child(11) { width: 80px; }  /* list qty */
-table.items th:nth-child(12) { width: 330px; } /* listing */
-table.items th:nth-child(13) { width: 36px; }  /* remove */
+table.items th:nth-child(6) { width: 78px; }   /* 7-day avg */
+table.items th:nth-child(7) { width: 72px; }   /* sold/day */
+table.items th:nth-child(8) { width: 74px; }   /* best buy */
+table.items th:nth-child(9) { width: 66px; }   /* value */
+table.items th:nth-child(10) { width: 64px; }  /* ducats */
+table.items th:nth-child(11) { width: 48px; }  /* D/P */
+table.items th:nth-child(12) { width: 82px; }  /* sell at */
+table.items th:nth-child(13) { width: 80px; }  /* list qty */
+table.items th:nth-child(14) { width: 330px; } /* listing */
+table.items th:nth-child(15) { width: 36px; }  /* remove */
 table.items td { overflow: hidden; text-overflow: ellipsis; }
+/* Column names wrap instead of being cut off (they run longer in some languages). */
+table.items thead th { white-space: normal; line-height: 1.25; vertical-align: bottom; overflow-wrap: anywhere; }
 table.items td select { max-width: 100%; }
 table.items .item a { overflow: hidden; text-overflow: ellipsis; }
 

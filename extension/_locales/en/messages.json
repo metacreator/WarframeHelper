@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Tenno Trade Helper",
+    "description": "Name of the add-on (not translated)"
+  },
+  "extensionDescription": {
+    "message": "Scan your Warframe inventory from screenshots, see live warframe.market prices, and list or mark items sold in one click.",
+    "description": "Store and add-on manager description"
+  },
+  "actionTitle": {
+    "message": "Open Tenno Trade Helper",
+    "description": "Tooltip of the toolbar button"
+  }
+}

@@ -4,15 +4,18 @@
   "description": "Tenno Trade Helper: Firefox add-on for selling Warframe items on warframe.market",
   "private": true,
   "scripts": {
-    "test": "node tests/run-firefox.js",
+    "test": "node tests/check-locales.js && node tests/run.js firefox",
     "lint": "web-ext lint",
-    "build": "web-ext build --overwrite-dest"
+    "build": "web-ext build --overwrite-dest",
+    "build:chrome": "node tools/build-chrome.js",
+    "test:chrome": "node tests/run.js chrome",
+    "test:edge": "node tests/run.js edge"
   },
   "engines": {
     "node": ">=18"
   },
   "devDependencies": {
-    "selenium-webdriver": "4.25.0",
+    "selenium-webdriver": "4.49.0",
     "web-ext": "8.3.0"
   }
 }

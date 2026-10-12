@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate */
+/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate, history, computeSets, LOCALES */
 // TEST BUILD ONLY: drives app.html from inside the add-on (WebDriver can't script extension pages)
 // and reports results to the mock server. The runner sets/clears the warframe.market cookie when asked.
 (async () => {
@@ -25,7 +25,7 @@
   let promptAnswer = '1';
   window.prompt = () => promptAnswer;
   async function capture(name) {
-    try { await post('/_shot', { name, data: await browser.tabs.captureVisibleTab() }); } catch (e) { await report('screenshot ' + name, false, e.message); }
+    try { await browser.tabs.update((await browser.tabs.getCurrent()).id, { active: true }); await post('/_shot', { name, data: await browser.tabs.captureVisibleTab() }); } catch (e) { await report('screenshot ' + name, false, e.message); }
   }
 
   try {
@@ -191,9 +191,11 @@
 
     // Background script has the backend and sees the login
     try {
-      const bg = await browser.runtime.getBackgroundPage();
+      // Firefox runs it as a background page; Chrome and Edge as a service worker, which a page can't look into.
+      const bg = browser.runtime.getBackgroundPage ? await browser.runtime.getBackgroundPage().catch(() => null) : null;
       const alarm = await browser.alarms.get('check-orders');
-      await report('background script loaded and sale checks scheduled', typeof bg.notifySales === 'function' && alarm?.periodInMinutes === 3, JSON.stringify(alarm));
+      await report('background script loaded and sale checks scheduled', (!bg || (typeof bg.notifySales === 'function' && typeof bg.t === 'function'))
+        && alarm?.periodInMinutes === 3, `${bg ? 'background page' : 'service worker'} ${JSON.stringify(alarm)}`);
     } catch (e) {
       await report('background script loaded and sale checks scheduled', false, e.message);
     }
@@ -257,12 +259,18 @@
     await report('your own listing is left out of the price to beat', own.lowestOther === 9 && own.sellAt === 9 - Number(document.getElementById('undercut').value || 0), `lowest other ${own.lowestOther}, sell at ${own.sellAt}`);
 
     // Reprice: a listing far above the market moves to the default price; your own "Sell at" price is kept
+    // Fixed, fresh market data for this item, so live prices can't make the price guard skip it.
     const akOrder = () => state.listings.get('akstiletto_prime_blueprint')?.[0];
+    const realAkStats = state.stats.get('akstiletto_prime_blueprint');
+    state.prices.set(rowKey(ak()), { lowestSell: 20, medianSell: 22, bestBuy: 15, sellers: 5, buyers: 1, fetchedAt: Date.now(),
+      sellOrders: [20, 21, 22, 23, 25].map((platinum) => ({ platinum, user: 'someone' })) });
+    state.stats.set('akstiletto_prime_blueprint', { fetchedAt: Date.now(), days: [] });
     await Backend.updateOrder(akOrder().id, { platinum: 999 });
     await loadListings(true);
     await repriceListings();
     await until(() => akOrder() && akOrder().platinum !== 999, 15000, 'reprice');
     const akTarget = buildRow(ak()).sellAt;
+    if (realAkStats) state.stats.set('akstiletto_prime_blueprint', realAkStats); else state.stats.delete('akstiletto_prime_blueprint');
     await report('reprice moves listings to the default price and keeps your own prices', akOrder().platinum === akTarget
       && /Akstiletto Prime Blueprint: 999p →/.test(lastConfirm) && /Kept your own "Sell at" price.*Soma Prime Barrel/s.test(lastConfirm),
       `now ${akOrder().platinum}p, target ${akTarget}p | ${lastConfirm.slice(0, 250)}`);
@@ -315,6 +323,75 @@
     click('#scanAdd');
     await report('re-scan keeps your quantity when no count is visible, and updates it when one is', keptQty === 7 && vitality().qty === 4, `${keptQty} then ${vitality().qty}`);
     click('#scanClear');
+
+    // Price history: completed trades over the last 7 days, matched to the row's rank
+    const akRowEl = () => document.querySelector('#tableListed tr[data-key^="akstiletto_prime_blueprint|"]');
+    await until(() => state.stats.has('akstiletto_prime_blueprint') && akRowEl()?.children[5].textContent !== '…', 40000, 'history');
+    const akRow = buildRow(ak());
+    await report('price history loaded and shown', typeof akRow.hist?.trades === 'number' && akRowEl().children[5].textContent === (akRow.avg7 === null ? '—' : String(akRow.avg7)),
+      `7-day avg ${akRow.avg7}p from ${akRow.hist?.trades} trades, ${akRow.perDay?.toFixed(1)}/day`);
+    const day = 24 * 60 * 60 * 1000;
+    const realSerration = state.stats.get('serration');
+    state.stats.set('serration', { fetchedAt: Date.now(), days: [
+      { at: Date.now() - day, volume: 2, price: 40, rank: 10, subtype: null },
+      { at: Date.now() - day, volume: 3, price: 5, rank: 0, subtype: null },
+      { at: Date.now() - 10 * day, volume: 50, price: 99, rank: 10, subtype: null }] });
+    const r10 = history({ slug: 'serration', rank: 10, subtype: null });
+    if (realSerration) state.stats.set('serration', realSerration); else state.stats.delete('serration');
+    await report('history uses the row\'s rank and only the last 7 days', r10.avg === 40 && r10.trades === 2, JSON.stringify(r10));
+    const lowVsHistory = { sellAt: 10, medianSell: null, price: { sellers: 0 }, avg7: 40, hist: { trades: 12 } };
+    await report('a price far below the 7-day average is flagged', underpriced(lowVsHistory) && !underpriced({ ...lowVsHistory, hist: { trades: 2 } }));
+
+    // Complete sets: Combine turns the parts into one set row (a part listed separately loses its listing);
+    // Split turns it back. One part is owned once more than the set needs.
+    const somaSet = await Backend.getSet('soma_prime_set');
+    const parts = somaSet.parts;
+    const qtyOf = (slug) => state.inventory.filter((e) => e.slug === slug).reduce((n, e) => n + e.qty, 0);
+    const partsBefore = new Map(parts.map((p) => [p.slug, qtyOf(p.slug)]));
+    addEntries(parts.map((p, i) => ({ slug: p.slug, qty: p.quantityInSet + (i === 0 ? 1 : 0), rank: null })));
+    const listedPart = parts[1].slug;
+    await fetch(`${MOCK}/_list-on-site?itemId=${state.bySlug.get(listedPart).id}&qty=${qtyOf(listedPart)}&platinum=50`);
+    await loadListings(true);
+    await computeSets();
+    await until(() => document.querySelector('#setsTable [data-set="soma_prime_set"]'), 30000, 'complete set shown');
+    document.querySelector('#setsTable [data-set="soma_prime_set"]').click();
+    await until(() => qtyOf('soma_prime_set') === 1, 20000, 'combined');
+    await report('Combine turns the parts into a set row and lowers part listings', qtyOf(parts[0].slug) === partsBefore.get(parts[0].slug) + 1
+      && parts.slice(1).every((p) => qtyOf(p.slug) === partsBefore.get(p.slug)) && /lowered or removed/.test(lastConfirm)
+      && !(await mockJson('/_orders')).some((o) => o.itemId === state.bySlug.get(listedPart).id),
+      parts.map((p) => `${p.slug}×${qtyOf(p.slug)}`).join(' '));
+    document.querySelector('tr[data-key^="soma_prime_set|"] [data-action=split]').click();
+    await until(() => qtyOf('soma_prime_set') === 0, 20000, 'split');
+    await report('Split turns the set back into its parts', parts.every((p, i) => qtyOf(p.slug) === partsBefore.get(p.slug) + p.quantityInSet + (i === 0 ? 1 : 0)),
+      parts.map((p) => `${p.slug}×${qtyOf(p.slug)}`).join(' '));
+
+    // Page language: every marked text has a translation, switching to Ukrainian translates the page, item
+    // names and built rows (inputs inside translated labels survive), the trade message stays English
+    const pageKeys = [...document.querySelectorAll('[data-i18n]')].map((el) => el.i18n?.key)
+      .concat([...document.querySelectorAll('[data-i18n-attr]')].flatMap((el) => Object.values(el.i18nAttrs ?? {})));
+    const untranslated = ['uk', 'es', 'zh-hans', 'zh-hant'].flatMap((l) => pageKeys.filter((k) => k && !(k in LOCALES[l])).map((k) => `${l}: ${k}`));
+    await report('every text on the page has a translation', pageKeys.length > 80 && !untranslated.length, `${pageKeys.length} texts; ${untranslated.slice(0, 5).join(' | ')}`);
+    const pageLang = document.getElementById('pageLang');
+    pageLang.value = 'uk';
+    pageLang.dispatchEvent(new Event('change'));
+    const ukNames = await Backend.getItemNames('uk');
+    await until(() => state.names && document.querySelector('#tableListed tr[data-key^="akstiletto_prime_blueprint|"] .item a')?.textContent === ukNames.akstiletto_prime_blueprint, 20000, 'Ukrainian page');
+    const headerCells = [...document.querySelectorAll('#tableUnlisted thead th')].map((th) => th.textContent);
+    await report('switching the page to Ukrainian translates text, headers, buttons and item names',
+      document.querySelector('#scanCard h2').textContent === 'Сканування знімків екрана' && headerCells[0] === 'Предмет'
+      && /Виставити все невиставлене/.test(document.getElementById('listAllBtn').textContent)
+      && document.querySelector('#tableListed [data-action=unlist]')?.textContent === 'Зняти'
+      && document.querySelector('label #fMin') && document.querySelector('label #scanLang') && document.documentElement.lang === 'uk',
+      `${document.querySelector('#scanCard h2').textContent} | ${headerCells.slice(0, 4).join(', ')} | ${document.querySelector('#tableListed .item a')?.textContent}`);
+    window.scrollTo(0, 0); await sleep(300); await capture('ukrainian-top');
+    document.getElementById('listedSection').scrollIntoView(); await sleep(300); await capture('ukrainian-table');
+    await report('the trade chat message keeps the English names', /\[Akstiletto Prime Blueprint\]/.test(document.getElementById('tradeMsg').value), document.getElementById('tradeMsg').value.slice(0, 120));
+    await report('the language choice is saved for notifications too', (await Backend.getSettings({ fresh: true })).pageLang === 'uk' && localStorage.getItem('pageLang') === 'uk');
+    pageLang.value = 'en';
+    pageLang.dispatchEvent(new Event('change'));
+    await until(() => document.querySelector('#scanCard h2').textContent === 'Scan screenshots' && state.names === null, 10000, 'back to English');
+    await report('switching back to English restores it', document.querySelector('#tableUnlisted thead th').textContent === 'Item'
+      && document.querySelector('#tableListed .item a')?.textContent === 'Akstiletto Prime Blueprint');
 
     // Logging out on the website is noticed
     await phase('need-logout');

@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Tenno Trade Helper",
-  "version": "0.1.0",
-  "description": "Scan your Warframe inventory from screenshots, see live warframe.market prices, and list or mark items sold in one click.",
+  "name": "__MSG_extensionName__",
+  "version": "1.0.0",
+  "description": "__MSG_extensionDescription__",
+  "default_locale": "en",
   "icons": {
     "48": "icons/icon-48.png",
     "96": "icons/icon-96.png",
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Open Tenno Trade Helper",
+    "default_title": "__MSG_actionTitle__",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -17,10 +18,29 @@
     }
   },
   "background": {
-    "scripts": ["lib/backend.js", "background.js"]
+    "scripts": [
+      "lib/compat.js",
+      "lib/backend.js",
+      "lib/i18n.js",
+      "locales/en.js",
+      "locales/uk.js",
+      "locales/es.js",
+      "locales/zh-hans.js",
+      "locales/zh-hant.js",
+      "background.js"
+    ]
   },
-  "permissions": ["storage", "unlimitedStorage", "cookies", "alarms", "notifications"],
-  "host_permissions": ["https://api.warframe.market/*", "https://warframe.market/*"],
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "cookies",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://api.warframe.market/*",
+    "https://warframe.market/*"
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
@@ -29,7 +49,9 @@
       "id": "tenno-trade-helper@metacreator",
       "strict_min_version": "128.0",
       "data_collection_permissions": {
-        "required": ["authenticationInfo"]
+        "required": [
+          "authenticationInfo"
+        ]
       }
     }
   }

@@ -27,14 +27,15 @@ const Backend = (() => {
   }
 
   let settings = null;
-  async function getSettings() {
+  async function getSettings({ fresh = false } = {}) {
+    if (fresh) settings = null;
     settings ??= { platform: 'pc', ...(await store.get('settings', {})) };
     return settings;
   }
   async function updateSettings(patch) {
     settings = { ...(await getSettings()), ...patch };
     await store.set('settings', settings);
-    if ('platform' in patch) { prices = {}; await store.set('prices', {}); ordersCache = null; }
+    if ('platform' in patch) { prices = {}; stats = {}; await store.set('prices', {}); await store.set('stats', {}); ordersCache = null; }
     return settings;
   }
 
@@ -259,6 +260,36 @@ const Backend = (() => {
     });
   }
 
+  // ---------- price history ----------
+
+  // Completed trades per day (people marking orders sold on warframe.market). Only the older v1 API has
+  // this; if it ever goes away, history just stays empty. One request covers every rank and refinement.
+  const STATS_TTL = 6 * 60 * 60 * 1000;
+  const STATS_DAYS = 8;
+  let stats = null;
+  let statsSaveTimer = null;
+
+  async function getStats(slug, force = false) {
+    stats ??= await store.get('stats', {});
+    const cached = stats[slug];
+    if (!force && cached && Date.now() - cached.fetchedAt < STATS_TTL) return cached;
+    const res = await upstream('GET', `/v1/items/${encodeURIComponent(slug)}/statistics`);
+    if (!res.ok) throw httpError(res.status, describeError(res.body, res.status));
+    const since = Date.now() - STATS_DAYS * 24 * 60 * 60 * 1000;
+    const days = (res.body?.payload?.statistics_closed?.['90days'] ?? [])
+      .filter((d) => Date.parse(d.datetime) >= since)
+      .map((d) => ({ at: Date.parse(d.datetime), volume: d.volume, price: d.wa_price ?? d.avg_price, rank: d.mod_rank ?? null, subtype: d.subtype ?? null }));
+    stats[slug] = { fetchedAt: Date.now(), days };
+    clearTimeout(statsSaveTimer);
+    statsSaveTimer = setTimeout(() => store.set('stats', stats), 1000);
+    return stats[slug];
+  }
+
+  async function cachedStats() {
+    stats ??= await store.get('stats', {});
+    return stats;
+  }
+
   // ---------- sets ----------
 
   async function getSet(slug) {
@@ -338,10 +369,10 @@ const Backend = (() => {
         sales.push({ slug: item.slug, name: item.name, qty: ev.quantity, platinum: ev.platinum, how: 'marked sold on warframe.market' });
         entry.qty -= ev.quantity;
         if (entry.qty <= 0) inventory = inventory.filter((e) => e !== entry);
-        sold.push({ name: item.name, qty: ev.quantity, platinum: ev.platinum });
+        sold.push({ slug: item.slug, name: item.name, qty: ev.quantity, platinum: ev.platinum });
       } else {
         entry.gone = { quantity: ev.quantity, platinum: ev.platinum };
-        gone.push({ name: item.name, qty: ev.quantity, platinum: ev.platinum });
+        gone.push({ slug: item.slug, name: item.name, qty: ev.quantity, platinum: ev.platinum });
       }
     }
     if (sold.length || gone.length) await saveInventory(inventory);
@@ -439,7 +470,7 @@ const Backend = (() => {
     PRICE_TTL_MINUTES,
     getSettings, updateSettings,
     hasAccess, requestAccess, authStatus,
-    getItems, getItemNames, getPrice, cachedPrices, getSet,
+    getItems, getItemNames, getPrice, cachedPrices, getStats, cachedStats, STATS_TTL, getSet,
     getInventory, saveInventory, getSales, addSales,
     checkOrders, createOrder, updateOrder, deleteOrder, closeOrder,
     exportData, importData,

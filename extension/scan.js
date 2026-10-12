@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet */
+/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet, t, guessLanguage, itemName */
 // Screenshot scanner: reads Warframe inventory screenshots with Tesseract.js (OCR, runs in the browser),
 // matches the text on each tile to a warframe.market item, and merges overlapping screenshots.
 //
@@ -123,18 +123,8 @@ async function ensureNames() {
     scan.names = await scan.namesPromise;
   } catch (err) {
     scan.namesPromise = null; // try again with the next screenshot
-    throw new Error(`Could not load ${GAME_LANGS[scan.lang].label} item names: ${err.message}`);
+    throw new Error(t('Could not load {lang} item names: {error}', { lang: GAME_LANGS[scan.lang].label, error: t(err.message) }));
   }
-}
-
-// The browser's language is the best first guess for the game's.
-function guessLanguage() {
-  const l = (navigator.language || 'en').toLowerCase();
-  if (l.startsWith('uk')) return 'uk';
-  if (l.startsWith('es')) return 'es';
-  if (/^zh-(tw|hk|mo|hant)/.test(l)) return 'zh-hant';
-  if (l.startsWith('zh')) return 'zh-hans';
-  return 'en';
 }
 
 // ---------- image prep ----------
@@ -764,23 +754,23 @@ const BUSY = ['queued', 'scanning', 'refining', 'counting'];
 
 function renderShots() {
   fill($('#shots'), scan.shots.map((s, i) => {
-    let status = s.status;
-    if (s.status === 'scanning') status = `reading ${Math.round(s.progress * 100)}%`;
-    if (s.status === 'refining') status = 'reading again…';
-    if (s.status === 'counting') status = 'reading counts…';
-    if (s.status === 'done') status = `${s.detections.filter((d) => d.match).length} items`;
-    if (s.status === 'error') status = 'error';
-    const title = s.error || (s.seconds && s.status === 'done' ? `${s.name} · read in ${s.seconds.toFixed(1)} s` : s.name);
+    let status = t('waiting');
+    if (s.status === 'scanning') status = t('reading {n}%', { n: Math.round(s.progress * 100) });
+    if (s.status === 'refining') status = t('reading again…');
+    if (s.status === 'counting') status = t('reading counts…');
+    if (s.status === 'done') status = t('{n} items', { n: s.detections.filter((d) => d.match).length });
+    if (s.status === 'error') status = t('error');
+    const title = s.error || (s.seconds && s.status === 'done' ? t('{name} · read in {s} s', { name: s.name, s: s.seconds.toFixed(1) }) : s.name);
     return h('div', { class: `shot${s.id === scan.previewId ? ' active' : ''}`, 'data-id': s.id, title },
       h('span', { class: 'shot-n' }, `#${i + 1}`),
       h('span', { class: `shot-status ${s.status}` }, status),
-      h('button', { class: 'icon', 'data-action': 'remove-shot', title: 'Remove screenshot' }, '✕'));
+      h('button', { class: 'icon', 'data-action': 'remove-shot', title: t('Remove screenshot') }, '✕'));
   }));
   $('#scanEmpty').hidden = scan.shots.length > 0;
   $('#scanResults').hidden = scan.shots.length === 0;
   const busy = scan.shots.some((s) => BUSY.includes(s.status));
   $('#scanStatus').textContent = busy
-    ? (scan.workers.some(Boolean) ? 'Reading screenshots…' : 'Loading text recognition (first time takes a few seconds)…')
+    ? (scan.workers.some(Boolean) ? t('Reading screenshots…') : t('Loading text recognition (first time takes a few seconds)…'))
     : '';
 }
 
@@ -801,20 +791,25 @@ function renderScanRows() {
     return h('tr', { 'data-key': r.key },
       h('td', null, h('input', { type: 'checkbox', 'data-field': 'checked', checked: r.checked })),
       h('td', null, h('div', { class: 'scan-item-wrap' },
-        h('input', { class: 'scan-item', list: 'itemNames', 'data-field': 'slug', value: r.ambiguous ? '' : r.item?.name ?? '',
-          placeholder: r.ambiguous ? 'Which item is this?' : 'Pick the right item…' }),
-        r.item?.subtypes && !r.ambiguous && h('select', { class: 'scan-subtype', 'data-field': 'subtype', title: 'Refinement' },
-          r.item.subtypes.map((s) => h('option', { selected: s === r.subtype }, s))))),
+        h('input', { class: 'scan-item', list: 'itemNames', 'data-field': 'slug', value: r.ambiguous || !r.item ? '' : itemName(r.item),
+          placeholder: r.ambiguous ? t('Which item is this?') : t('Pick the right item…') }),
+        r.item?.subtypes && !r.ambiguous && h('select', { class: 'scan-subtype', 'data-field': 'subtype', title: t('Refinement') },
+          r.item.subtypes.map((s) => h('option', { value: s, selected: s === r.subtype }, t(s)))))),
       h('td', { class: 'r' }, h('input', { class: r.qtySeen ? 'num' : 'num qty-unseen', type: 'number', min: 1, 'data-field': 'qty', value: r.qty,
-        title: r.qtySeen ? null : 'No count visible: an item already in your list keeps its quantity (type a number to set it)' })),
+        title: r.qtySeen ? null : t('No count visible: an item already in your list keeps its quantity (type a number to set it)') })),
       h('td', { class: 'muted' }, r.shots.map(shotLabel).join(' ')),
       h('td', { class: 'muted ocr', title: r.text }, r.text),
-      h('td', { class: `r ${confCls}`, title: r.ambiguous ? 'Only part of the name was readable and it fits several items' : null },
-        r.ambiguous ? 'unclear' : r.item ? `${conf}%` : '—'));
+      h('td', { class: `r ${confCls}`, title: r.ambiguous ? t('Only part of the name was readable and it fits several items') : null },
+        r.ambiguous ? t('unclear') : r.item ? `${conf}%` : '—'));
   }));
   const checked = scan.rows.filter((r) => r.checked && r.item && !r.ambiguous);
   const unclear = scan.rows.filter((r) => r.ambiguous).length;
-  $('#scanSummary').textContent = `${scan.rows.length - unknown - unclear} matched, ${checked.length} selected` + (unclear ? `, ${unclear} unclear (pick the item)` : '') + (unknown ? `, ${unknown} unrecognised text${unknown === 1 ? '' : 's'}` : '');
+  $('#scanSummary').textContent = [
+    t('{n} matched', { n: scan.rows.length - unknown - unclear }),
+    t('{n} selected', { n: checked.length }),
+    unclear ? t('{n} unclear (pick the item)', { n: unclear }) : '',
+    unknown ? t('{n} unrecognised texts', { n: unknown }) : '',
+  ].filter(Boolean).join(', ');
   $('#scanAdd').disabled = checked.length === 0;
 }
 
@@ -844,7 +839,7 @@ function renderPreview() {
       ctx.strokeRect(c.x0 - lw, c.y0 - lw, c.x1 - c.x0 + 2 * lw, c.y1 - c.y0 + 2 * lw);
     }
     if (item) {
-      const label = `${item.name}${row.subtype && row.subtype !== item.subtypes[0] ? ` (${row.subtype})` : ''} ×${d.qty}`;
+      const label = `${itemName(item)}${row.subtype && row.subtype !== item.subtypes[0] ? ` (${t(row.subtype)})` : ''} ×${d.qty}`;
       const tw = ctx.measureText(label).width;
       const lh = parseInt(ctx.font, 10) * 1.3;
       ctx.fillStyle = 'rgba(0,0,0,0.75)';
@@ -871,8 +866,15 @@ function addScanToList() {
   const entries = [...byKey.values()].map((e) => ({ ...e, rank: null }));
   const setQty = $('#scanMode').value === 'set';
   addEntries(entries, { setQty });
-  setStatus(`${setQty ? 'Updated' : 'Added'} ${entries.length} items from screenshots.`
-    + (setQty && entries.some((e) => !e.qtyKnown) ? ' Items without a visible count kept the quantity they had.' : ''));
+  setStatus((setQty ? t('Updated {n} items from screenshots.', { n: entries.length }) : t('Added {n} items from screenshots.', { n: entries.length }))
+    + (setQty && entries.some((e) => !e.qtyKnown) ? ' ' + t('Items without a visible count kept the quantity they had.') : ''));
+}
+
+// Called by the page when its language changes.
+function renderScanTexts() {
+  renderShots();
+  renderScanRows();
+  renderPreview();
 }
 
 // ---------- events ----------
