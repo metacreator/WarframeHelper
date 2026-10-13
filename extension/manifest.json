@@ -17,25 +17,24 @@
       "48": "icons/icon-48.png"
     }
   },
+  "commands": {
+    "quick-capture": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9"
+      },
+      "description": "__MSG_commandQuickCapture__"
+    }
+  },
   "background": {
     "scripts": [
       "lib/compat.js",
-      "lib/backend.js",
-      "lib/i18n.js",
-      "locales/en.js",
-      "locales/uk.js",
-      "locales/es.js",
-      "locales/zh-hans.js",
-      "locales/zh-hant.js",
       "background.js"
     ]
   },
   "permissions": [
     "storage",
     "unlimitedStorage",
-    "cookies",
-    "alarms",
-    "notifications"
+    "cookies"
   ],
   "host_permissions": [
     "https://api.warframe.market/*",

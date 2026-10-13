@@ -12,7 +12,7 @@ const path = require('path');
 const REAL_API = 'https://api.warframe.market';
 const TOKEN = 'mock-token-123';
 const LANGS = ['en', 'uk', 'es', 'zh-hans', 'zh-hant'];
-const FIXTURES = ['shotA.png', 'shotB.png', 'real1.png', 'real2.png', 'language-shots.json', ...LANGS.map((l) => `lang-${l}.png`)];
+const FIXTURES = ['mods-pick.png', 'relic-reward.png', 'relic-reward2.png', 'shotA.png', 'shotB.png', 'real1.png', 'real2.png', 'language-shots.json', ...LANGS.map((l) => `lang-${l}.png`)];
 
 function startMock({ port = 3901, fixturesDir, outputDir, onReport = () => {} }) {
   const orders = new Map();

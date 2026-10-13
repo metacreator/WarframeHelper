@@ -302,13 +302,6 @@ LOCALES.es = {
   'Added {n} items from screenshots.': esPlural('Se añadió {n} objeto desde capturas.', 'Se añadieron {n} objetos desde capturas.'),
   'Items without a visible count kept the quantity they had.': 'Los objetos sin cantidad visible conservaron la que tenían.',
 
-  // ---- notifications ----
-  'Sold: {qty}× {name}': 'Vendido: {qty}× {name}',
-  '{n} items sold': esPlural('{n} objeto vendido', '{n} objetos vendidos'),
-  '{total}p. Removed from your list.': '{total}p. Quitado de tu lista.',
-  'Listing gone: {name}': 'Anuncio desaparecido: {name}',
-  '{n} listings disappeared': esPlural('Desapareció {n} anuncio', 'Desaparecieron {n} anuncios'),
-  'Open Tenno Trade Helper to confirm whether they sold.': 'Abre Tenno Trade Helper para confirmar si se vendieron.',
 
   // ---- layout ----
   'More actions': 'Más acciones',
@@ -328,4 +321,33 @@ LOCALES.es = {
   '+ Add item': '+ Añadir objeto',
   'OK': 'Aceptar',
   'Cancel': 'Cancelar',
+
+  // ---- quick price check ----
+  'not on warframe.market': 'no está en warframe.market',
+  'My items': 'Mis objetos',
+  'Quick price check': 'Consulta rápida de precios',
+  'Paste a screenshot with {0}+{1}, drop it here, or click to choose one': 'Pega una captura con {0}+{1}, suéltala aquí o haz clic para elegir una',
+  'You get the lowest online price of each item on it. Nothing is added to your list.': 'Verás el precio en línea más bajo de cada objeto. No se añade nada a tu lista.',
+  'Reading the screenshot… {n}%': 'Leyendo la captura… {n}%',
+  'Checking prices…': 'Consultando precios…',
+  'No items found on this screenshot.': 'No se encontraron objetos en esta captura.',
+  'rank 0': 'rango 0',
+  "{n} names couldn't be read for sure, so they're left out.": { one: 'No se pudo leer con seguridad {n} nombre, así que se omite.', other: 'No se pudieron leer con seguridad {n} nombres, así que se omiten.' },
+
+  // ---- screenshot shortcut ----
+  '{0} Take screenshot': '{0} Hacer captura',
+  'Delay {0}': 'Espera {0}',
+  'Time to switch to the game before the screenshot is taken': 'Tiempo para volver al juego antes de hacer la captura',
+  'Stop sharing': 'Dejar de compartir',
+  'Shortcut:': 'Atajo:',
+  'not set': 'sin asignar',
+  'works while the browser is in front': 'funciona con el navegador en primer plano',
+  'works in the game too': 'funciona también dentro del juego',
+  'change': 'cambiar',
+  'Sharing your screen with this page. Screenshots never leave this computer.': 'Compartiendo tu pantalla con esta página. Las capturas nunca salen de este equipo.',
+  'The first time, your browser asks which screen to share: pick the one the game is on.': 'La primera vez, el navegador te pregunta qué pantalla compartir: elige la del juego.',
+  'Screenshot in {n}…': 'Captura en {n}…',
+  'Click "Take screenshot" first, so your browser can ask which screen to share.': 'Primero haz clic en «Hacer captura» para que el navegador pregunte qué pantalla compartir.',
+  "The screen wasn't shared.": 'No se compartió la pantalla.',
+  'Screenshot from {time}': 'Captura de las {time}',
 };

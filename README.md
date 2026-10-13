@@ -5,6 +5,8 @@ A browser add-on for Firefox, LibreWolf, Chrome and Edge for selling Warframe it
 - **Scan your inventory from screenshots.** Item names, stack counts and relic refinements are read in your browser,
   with the game in English, Ukrainian, Spanish or Chinese. Overlapping screenshots are counted once; when counts
   differ, the newest screenshot wins, and a tile without a visible count keeps the quantity you already have.
+- **Quick price check:** paste one screenshot, or press a shortcut that takes one of the game's screen, and see
+  what each item on it sells for (and its ducats), without adding anything to your list.
 - **See what everything is worth right now:** cheapest online seller, median, best buy offer, ducats, plus the
   7-day average of completed trades and how many sell per day.
 - **Complete prime sets:** see which sets you own every part of, and combine the parts into one set row to list.
@@ -12,7 +14,8 @@ A browser add-on for Firefox, LibreWolf, Chrome and Edge for selling Warframe it
   on the site (Steam, Google, Discord or password).
 - **Keep listings competitive:** one click moves them to the cheapest other online seller minus your undercut.
   Hide listings without deleting them, and record parts traded to Baro Ki'Teer for ducats.
-- **Sales made on the website are picked up automatically**, with a notification.
+- **Sales made on the website are picked up automatically** while the page is open, and prices refresh every hour
+  (or when you press Refresh). Close the page and the add-on does nothing in the background.
 - Safety checks: mods and arcanes can't be listed until you've set their rank, prices are refreshed before listing,
   and a price far below what others ask needs confirming.
 - **In your language:** English, Ukrainian, Spanish, and Simplified and Traditional Chinese, including item names.

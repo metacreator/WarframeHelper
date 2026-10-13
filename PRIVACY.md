@@ -15,6 +15,10 @@ It has no server of its own and no analytics. The developer receives no data fro
   current orders and trade statistics on the items in your list.
 - **Screenshots you add.** Screenshots are read on your computer by the bundled text-recognition library.
   They are never uploaded and are discarded when you close the page.
+- **Your screen, if you share it.** For the quick price check's screenshot button and shortcut, you can share a
+  screen with the add-on page (your browser asks which one). The page takes a picture of it only when you press
+  the button or the shortcut, reads it on your computer like any other screenshot, and never uploads it.
+  Sharing ends when you click "Stop sharing" or close the page.
 
 ## What the add-on stores
 

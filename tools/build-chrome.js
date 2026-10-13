@@ -1,6 +1,8 @@
 // Makes the Chrome / Edge version of the add-on from extension/. The code is the same; only the package differs:
 // - the background scripts run in a service worker (sw.js loads them with importScripts), as Chromium requires
 // - Firefox-only manifest keys are left out
+// - keyboard shortcuts are "global": they also work while another program (the game) is in front. Chromium
+//   only gives a global shortcut its suggested key when it's Ctrl+Shift+0…9. Firefox has no global shortcuts.
 //
 //   node tools/build-chrome.js      → dist/chrome/ (load it unpacked) and dist/tenno_trade_helper-chrome-<version>.zip
 
@@ -22,6 +24,7 @@ function makeChromeVariant(srcDir, outDir) {
     `'use strict';\n// Chrome/Edge: the same background scripts as Firefox, loaded into the service worker.\n/* global importScripts */\nimportScripts(${scripts.map((s) => `'${s}'`).join(', ')});\n`);
   manifest.background = { service_worker: 'sw.js' };
   delete manifest.browser_specific_settings;
+  for (const command of Object.values(manifest.commands ?? {})) command.global = true;
   manifest.minimum_chrome_version = '120';
   fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
   return manifest;

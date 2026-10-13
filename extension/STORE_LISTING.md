@@ -10,11 +10,12 @@ Scan your Warframe inventory from screenshots, see live warframe.market prices, 
 Selling prime parts and mods on warframe.market, without the busywork.
 
 - **Scan your inventory from screenshots.** Take screenshots of your in-game inventory while scrolling and drop them in. Item names, counts and relic refinements are read on your computer, and overlapping screenshots are handled for you. Works with the game in English, Ukrainian, Spanish and Chinese (Simplified and Traditional).
+- **Quick price check:** paste a screenshot of a relic reward or any other screen, or press Ctrl+Shift+9 to take one of the game, and see each item's lowest price and ducats.
 - **See what everything is worth right now:** the cheapest online seller, the median price, the best buy offer, ducats and ducats-per-platinum, and what it actually sold for over the last 7 days.
 - **Sell complete prime sets:** see which sets you own every part of, and combine the parts into a set you can list.
 - **List in one click,** at the lowest online price, a few platinum under it, or your own price, and as many as you want to sell. Or list everything at once.
 - **Stay the cheapest:** reprice all your listings to just under the other online sellers in one click, or hide them while you can't trade.
-- **Mark items sold** (or traded to Baro Ki'Teer for ducats) and they leave your list; the order on warframe.market is closed too. Sales you mark on the website are picked up automatically, with a notification.
+- **Mark items sold** (or traded to Baro Ki'Teer for ducats) and they leave your list; the order on warframe.market is closed too. Sales you mark on the website are picked up automatically while the page is open. Nothing runs in the background once you close it.
 - **Sales history** and a ready-made "WTS" message for trade chat.
 
 - **In your language:** English, Ukrainian, Spanish, and Simplified and Traditional Chinese, including item names.
@@ -25,7 +26,7 @@ Works in Firefox, LibreWolf, Chrome and Edge.
 Not affiliated with Digital Extremes or warframe.market.
 
 **What data the add-on uses (for the listing and the data-collection question):**
-The add-on reads your warframe.market session cookie in this browser and sends it only to warframe.market (api.warframe.market) to load your orders and to create, update or close orders you ask it to. Item names from your list are sent to warframe.market to look up prices. Screenshots are processed locally and never uploaded. Nothing is sent to the add-on's developer or to anyone else, and there is no analytics or tracking.
+The add-on reads your warframe.market session cookie in this browser and sends it only to warframe.market (api.warframe.market) to load your orders and to create, update or close orders you ask it to. Item names from your list are sent to warframe.market to look up prices. Screenshots are processed locally and never uploaded. If you share your screen for the screenshot shortcut, the page takes a picture only when you press it, and the picture stays on your computer. Nothing is sent to the add-on's developer or to anyone else, and there is no analytics or tracking.
 
 **Category:** Games / Shopping
 **Support:** GitHub issues on the project repository

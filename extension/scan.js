@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet, t, guessLanguage, itemName, flagPicker */
+/* global browser, Tesseract, Backend, state, category, findItem, addEntries, setStatus, h, fill, $, storageGet, storageSet, t, guessLanguage, itemName, flagPicker, activeTab, showTab, fetchPrice, rowKey, ASSETS, INTL_LOCALE, pageLang */
 // Screenshot scanner: reads Warframe inventory screenshots with Tesseract.js (OCR, runs in the browser),
 // matches the text on each tile to a warframe.market item, and merges overlapping screenshots.
 //
@@ -13,12 +13,14 @@
 const TESSERACT_DIR = 'vendor/tesseract';
 const TESSERACT_URL = `${TESSERACT_DIR}/tesseract.min.js`;
 const COUNT_RE = /^[x×]?(\d{1,3}(?:[,.]\d{3})*|\d{1,5})[x×]?$/i;
+// Tesseract settings. Each set is complete, as a worker keeps whatever was set last. The images are always
+// black text on white, so Tesseract isn't asked to try unsure lines inverted as well (do_invert), which saves time.
 // Names: sparse text mode finds as much text as possible, in no particular order.
-const NAME_PARAMS = { tessedit_pageseg_mode: '11', tessedit_char_whitelist: '', preserve_interword_spaces: '1' };
+const NAME_PARAMS = { tessedit_do_invert: '0', tessedit_pageseg_mode: '11', tessedit_char_whitelist: '', preserve_interword_spaces: '1' };
 // Counts: a tile area read as one block of digits.
-const COUNT_PARAMS = { tessedit_pageseg_mode: '6', tessedit_char_whitelist: '0123456789x' };
+const COUNT_PARAMS = { tessedit_do_invert: '0', tessedit_pageseg_mode: '6', tessedit_char_whitelist: '0123456789x', preserve_interword_spaces: '0' };
 // One name area re-read as a block: far more accurate than the whole-screen pass, which tends to drop letters.
-const TILE_PARAMS = { tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' };
+const TILE_PARAMS = { tessedit_do_invert: '0', tessedit_pageseg_mode: '6', tessedit_char_whitelist: '', preserve_interword_spaces: '1' };
 
 // Languages the game can be in. ocr: Tesseract language data in vendor/tesseract/lang. Item names in that
 // language come from warframe.market, which uses the game's own translations.
@@ -39,14 +41,13 @@ const REFINEMENTS = {
   radiant: ['radiant', 'radiante', 'сяйна', 'сяюча', 'променева', '光辉', '光輝'],
 };
 
-// Two screenshots are read at the same time on computers with enough cores.
+// Two screenshots are read at the same time on computers with enough cores (their reading shares the OCR workers).
 const POOL_SIZE = Math.max(1, Math.min(2, Math.floor((navigator.hardwareConcurrency || 2) / 2)));
 
 const scan = {
   shots: [],         // { id, name, img, status, progress, detections, processed, seconds, timings }
   nextId: 1,
   pending: [],       // shots waiting for a free worker
-  workers: [],       // per slot: { ocr, promise }
   busy: [],          // per slot: shot being read (for progress)
   lang: 'en',
   names: null,       // { slug: name } in the game language; null = English
@@ -83,32 +84,107 @@ async function createWorker(ocr, logger) {
   });
 }
 
-// Stack counts are digits in every language, and the English model reads them best (the Ukrainian one takes
-// a 3 for a З). One worker serves both slots: its settings never change, and its jobs are short.
-let countWorker = null;
-function getCountWorker() {
-  countWorker ??= createWorker('eng').then(async (w) => { await w.setParameters(COUNT_PARAMS); return w; });
-  countWorker.catch(() => { countWorker = null; });
-  return countWorker;
+// A copy of a prepared image with the names already read exactly painted over: reading them again can't improve
+// them, and Tesseract's time goes mostly into the text it finds. (Relics stay: their refinement may be missing.)
+function withoutSureNames(canvas, scale, detections, textH) {
+  const copy = document.createElement('canvas');
+  copy.width = canvas.width;
+  copy.height = canvas.height;
+  const ctx = copy.getContext('2d');
+  ctx.drawImage(canvas, 0, 0);
+  ctx.fillStyle = '#fff';
+  const pad = textH * 0.3;
+  for (const d of detections) {
+    if (matchQuality(d.match) < 1 || d.match.item.subtypes) continue;
+    ctx.fillRect((d.x0 - pad) * scale, (d.y0 - pad) * scale, (d.x1 - d.x0 + 2 * pad) * scale, (d.y1 - d.y0 + 2 * pad) * scale);
+  }
+  return copy;
 }
 
-// Each slot has its own worker, created for the current game language (and replaced when it changes).
-async function getWorker(slot) {
-  const ocr = GAME_LANGS[scan.lang].ocr;
-  const current = scan.workers[slot];
-  if (current?.ocr === ocr) return current.promise;
-  if (current) current.promise.then((w) => w.terminate()).catch(() => {});
-  const promise = createWorker(ocr, (m) => {
-    const shot = scan.busy[slot];
-    if (shot && m.status === 'recognizing text') {
-      shot.progress = m.progress;
-      renderShotsSoon();
-    }
-  });
-  scan.workers[slot] = { ocr, promise };
-  promise.catch(() => { if (scan.workers[slot]?.promise === promise) scan.workers[slot] = null; });
-  return promise;
+// ---------- OCR workers ----------
+
+// Tesseract workers are pooled per language data, and shared by everything being read: a screenshot is read in
+// bands side by side, and name re-reads and count reads run in parallel. Stack counts use the English data in
+// every game language: digits read best with it (the Ukrainian one takes a 3 for a З). Workers start on first
+// use and stop after a while without work, which frees their memory.
+const OCR_WORKERS = Math.max(1, Math.min(4, Math.floor((navigator.hardwareConcurrency || 2) / 2)));
+const POOL_IDLE_MS = 10 * 60 * 1000;
+const pools = new Map(); // ocr -> { ocr, size, workers: [{ worker (promise), busy, params, onProgress }], waiting, timer }
+
+function getPool(ocr, size) {
+  if (!pools.has(ocr)) pools.set(ocr, { ocr, size, workers: [], waiting: [], timer: null });
+  const pool = pools.get(ocr);
+  pool.size = Math.max(pool.size, size);
+  return pool;
 }
+
+function startWorker(pool) {
+  const entry = { busy: true, params: null, onProgress: null };
+  entry.worker = createWorker(pool.ocr, (m) => { if (m.status === 'recognizing text') entry.onProgress?.(m.progress); });
+  entry.worker.catch(() => {}); // a worker that failed to start is replaced when a job finds out
+  pool.workers.push(entry);
+  return entry;
+}
+
+function acquire(pool) {
+  clearTimeout(pool.timer);
+  const free = pool.workers.find((w) => !w.busy);
+  if (free) { free.busy = true; return Promise.resolve(free); }
+  if (pool.workers.length < pool.size) return Promise.resolve(startWorker(pool));
+  return new Promise((resolve) => pool.waiting.push(resolve));
+}
+
+function release(pool, entry, broken) {
+  if (broken) { // not reused: the next job gets a fresh one
+    pool.workers.splice(pool.workers.indexOf(entry), 1);
+    entry.worker.then((w) => w.terminate()).catch(() => {});
+  }
+  const next = pool.waiting.shift();
+  if (next) { next(broken ? startWorker(pool) : entry); return; }
+  entry.busy = false;
+  stopWhenIdle(pool);
+}
+
+function stopWhenIdle(pool) {
+  if (pool.workers.some((w) => w.busy)) return;
+  clearTimeout(pool.timer);
+  pool.timer = setTimeout(() => {
+    pools.delete(pool.ocr);
+    for (const w of pool.workers) w.worker.then((wk) => wk.terminate()).catch(() => {});
+  }, POOL_IDLE_MS);
+}
+
+// Starts the workers ahead of a screenshot (a screen shared, a file dragged over the page), so that reading it
+// doesn't wait for them. They stop again if nothing comes.
+function warmUp() {
+  const wanted = [getPool(GAME_LANGS[scan.lang].ocr, OCR_WORKERS), getPool('eng', scan.lang === 'en' ? OCR_WORKERS : 2)];
+  for (const pool of wanted) {
+    while (pool.workers.length < pool.size) startWorker(pool).busy = false;
+    stopWhenIdle(pool);
+  }
+}
+
+// Reads one image with a worker for that language data, with these settings. Returns Tesseract's result data.
+async function ocrJob(ocr, image, params, output, onProgress, size = OCR_WORKERS) {
+  const pool = getPool(ocr, size);
+  const entry = await acquire(pool);
+  let broken = false;
+  try {
+    const worker = await entry.worker;
+    if (entry.params !== params) { await worker.setParameters(params); entry.params = params; }
+    entry.onProgress = onProgress;
+    return (await worker.recognize(image, {}, output)).data;
+  } catch (err) {
+    broken = true;
+    throw err;
+  } finally {
+    entry.onProgress = null;
+    release(pool, entry, broken);
+  }
+}
+
+// Stack counts: English data, at most two workers of their own when the game is in another language.
+const readCount = (image) => ocrJob('eng', image, COUNT_PARAMS, { blocks: true }, null, scan.lang === 'en' ? OCR_WORKERS : 2);
 
 function setLanguage(lang) {
   scan.lang = GAME_LANGS[lang] ? lang : 'en';
@@ -142,9 +218,8 @@ const luminance = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
 // Upscales the screenshot and turns every pixel black (text) or white (not text) using isText(r, g, b);
 // Tesseract reads black-on-white far better than the game's light-on-dark.
-function binarize(img, isText) {
+function binarize(img, isText, scale = img.naturalWidth <= 1920 ? 2 : img.naturalWidth <= 2560 ? 1.5 : 1) {
   const w = img.naturalWidth;
-  const scale = w <= 1920 ? 2 : w <= 2560 ? 1.5 : 1;
   const c = document.createElement('canvas');
   c.width = Math.round(w * scale);
   c.height = Math.round(img.naturalHeight * scale);
@@ -175,11 +250,18 @@ function preprocessColor(img, color) {
   });
 }
 
+// Third pass, for mod cards (the Mods screen, reward choices): their names are white over bright card art.
+// Only light, colourless pixels are kept (the art is gold), enlarged a bit more, and read as one block, which
+// copes better with leftover bits of art than the sparse mode used for whole inventory screens.
+const isWhiteText = (r, g, b) => luminance(r, g, b) >= 185 && Math.max(r, g, b) - Math.min(r, g, b) <= 75;
+const BLOCK_PARAMS = { tessedit_do_invert: '0', tessedit_pageseg_mode: '6', tessedit_char_whitelist: '', preserve_interword_spaces: '1' };
+
 // Learns the text colour (it depends on the player's UI theme) from names the first pass read confidently:
-// inside each name box, the brightest third of the pixels is the lettering.
+// inside each name box, the brightest third of the pixels is the lettering. One such name is enough (a reward
+// screen has only a few); the colour pass only replaces readings it improves on.
 function estimateTextColor(img, detections) {
   const sure = detections.filter((d) => d.match && d.match.score >= 0.9 && !d.match.ambiguous);
-  if (sure.length < 2) return null;
+  if (!sure.length) return null;
   const c = document.createElement('canvas');
   c.width = img.naturalWidth;
   c.height = img.naturalHeight;
@@ -361,9 +443,10 @@ function looksComplete(detections, textH) {
 
 // Tesseract.js re-encodes the whole image on every call, even to read a small area, so small areas are cut
 // out first (with a white margin, as text touching the edge reads worse). Word boxes come back in screenshot
-// coordinates. r is in screenshot pixels; the canvas is the upscaled, black-on-white one.
+// coordinates. r is in screenshot pixels; the canvas is the upscaled, black-on-white one. read(image, output)
+// runs the OCR job.
 const CROP_MARGIN = 8;
-async function recognizeArea(worker, canvas, scale, r, output) {
+async function recognizeArea(read, canvas, scale, r, output) {
   const w = Math.max(1, Math.round((r.x1 - r.x0) * scale)), ht = Math.max(1, Math.round((r.y1 - r.y0) * scale));
   const c = document.createElement('canvas');
   c.width = w + 2 * CROP_MARGIN;
@@ -372,7 +455,7 @@ async function recognizeArea(worker, canvas, scale, r, output) {
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, c.width, c.height);
   ctx.drawImage(canvas, Math.round(r.x0 * scale), Math.round(r.y0 * scale), w, ht, CROP_MARGIN, CROP_MARGIN, w, ht);
-  const { data } = await worker.recognize(c, {}, output);
+  const data = await read(c, output);
   const toShot = (b) => ({ x0: r.x0 + (b.x0 - CROP_MARGIN) / scale, y0: r.y0 + (b.y0 - CROP_MARGIN) / scale, x1: r.x0 + (b.x1 - CROP_MARGIN) / scale, y1: r.y0 + (b.y1 - CROP_MARGIN) / scale });
   return { text: data.text, words: output?.blocks ? wordsFrom(data).map((wd) => ({ text: wd.text, confidence: wd.confidence, box: toShot(wd.bbox) })) : [] };
 }
@@ -395,72 +478,114 @@ async function readCounts(canvas, scale, detections, textH) {
   const H = yGaps.length ? median(yGaps) : W * 1.2;
   const imgW = canvas.width / scale;
 
-  const worker = await getCountWorker();
-  for (const row of rows) {
+  // Every tile is read at the same time (each on its own; the workers share them out).
+  await Promise.all(rows.flatMap((row) => {
     // Every tile in a row ends at the same height, just under its lowest name line.
     const rowBottom = Math.max(...row.map((d) => d.y1));
-    for (const d of row) {
-      if (d.countBox) continue; // already found next to the name
+    return row.map(async (d) => {
+      if (d.countBox) return; // already found next to the name
       const left = Math.max(0, cx(d) - W / 2), right = Math.min(imgW, cx(d) + W / 2);
       const tileTop = Math.max(0, rowBottom - H + textH);
       const top = tileTop, bottom = Math.min(d.y0 - textH * 0.2, tileTop + (d.y0 - tileTop) * 0.4);
-      if (bottom - top < textH || right - left < textH) continue;
-      const { words } = await recognizeArea(worker, canvas, scale, { x0: left, y0: top, x1: right, y1: bottom }, { blocks: true });
+      if (bottom - top < textH || right - left < textH) return;
+      const { words } = await recognizeArea(readCount, canvas, scale, { x0: left, y0: top, x1: right, y1: bottom }, { blocks: true });
       const nums = words
         .filter((w) => w.confidence >= 80 && COUNT_RE.test(w.text.trim()))
         .filter((w) => { const wh = w.box.y1 - w.box.y0; return wh >= textH * 0.6 && wh <= textH * 1.8; })
         .sort((a, b) => a.box.y0 - b.box.y0);
-      if (!nums.length) continue;
+      if (!nums.length) return;
       const qty = Number(nums[0].text.replace(/[^0-9]/g, ''));
       if (qty > 1) {
         d.qty = qty;
         d.countText = `${nums[0].text} (${Math.round(nums[0].confidence)}%)`;
         d.countBox = nums[0].box;
       }
-    }
-  }
+    });
+  }));
 }
 
 // ---------- matching text to items ----------
 
-function levenshtein(a, b) {
+// Edit distance between a and b. Gives up (Infinity) once every way through has cost stop or more: the caller
+// then knows the distance is at least stop. Two reused rows keep it from allocating.
+let levPrev = new Int32Array(64), levCur = new Int32Array(64);
+function levenshtein(a, b, stop = Infinity) {
   if (a === b) return 0;
-  let prev = new Array(b.length + 1);
-  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  const n = b.length;
+  if (levPrev.length <= n) { levPrev = new Int32Array(n * 2 + 1); levCur = new Int32Array(n * 2 + 1); }
+  let prev = levPrev, cur = levCur;
+  for (let j = 0; j <= n; j++) prev[j] = j;
   for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    const ca = a.charCodeAt(i - 1);
+    cur[0] = i;
+    let rowMin = i;
+    for (let j = 1; j <= n; j++) {
+      const v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca === b.charCodeAt(j - 1) ? 0 : 1));
+      cur[j] = v;
+      if (v < rowMin) rowMin = v;
     }
-    prev = cur;
+    if (rowMin >= stop) return Infinity;
+    [prev, cur] = [cur, prev];
   }
-  return prev[b.length];
+  return prev[n];
 }
 
-let indexCache = { key: null, list: [] };
-function matchIndex() {
-  const cat = $('#scanCategory').value;
-  const key = `${cat}|${scan.lang}|${!!scan.names}`;
-  if (indexCache.key === key) return indexCache.list;
+// Relic rewards that warframe.market doesn't trade. A quick price check shows them as such rather than leaving
+// them out (a reward screen often has a Forma Blueprint); the list scanner never adds them.
+const NOT_ON_MARKET = ['Forma Blueprint', 'Exilus Weapon Adapter Blueprint', 'Riven Sliver'].map((name) => ({
+  slug: name.toLowerCase().replace(/ /g, '_'), name, tags: [], maxRank: null, ducats: null, subtypes: null, thumb: null, notOnMarket: true,
+}));
+
+// cat: the "Looking for" category ('' = any item; 'quick' = any item, plus the rewards above). Kept per
+// category, as two screenshots may be read at once.
+const indexCache = new Map();
+const indexKey = (cat) => `${cat}|${scan.lang}|${!!scan.names}`;
+function matchIndex(cat) {
+  const key = indexKey(cat);
+  if (indexCache.has(key)) return indexCache.get(key);
   const list = [];
   for (const item of state.items) {
     if (item.tags.includes('set')) continue; // sets aren't inventory items
-    if (cat && category(item) !== cat) continue;
+    if (cat && cat !== 'quick' && category(item) !== cat) continue;
     // The inventory shows the same full names as warframe.market ("... Systems Blueprint"), so no
     // shortened variants: "Epitaph Prime" alone must stay unclear, not become "Epitaph Prime Blueprint".
     list.push({ norm: norm(scan.names?.[item.slug] ?? item.name), item });
   }
-  indexCache = { key, list };
+  if (cat === 'quick') for (const item of NOT_ON_MARKET) list.push({ norm: norm(item.name), item });
+  indexCache.set(key, list);
   return list;
 }
 
-function bestMatch(text) {
+// The same text comes up again and again (every pass and re-read reads most names), so results are remembered
+// per item list. Callers adjust the result they get, so each gets its own copy.
+const matchCache = new Map(); // indexKey -> Map(normalised text -> result)
+function bestMatch(text, cat) {
   const q = norm(text);
   if (textWeight(q, true) < 4) return null;
+  const key = indexKey(cat);
+  if (!matchCache.has(key) || matchCache.get(key).size > 20000) matchCache.set(key, new Map());
+  const cache = matchCache.get(key);
+  if (!cache.has(q)) cache.set(q, findBestMatch(q, cat));
+  const found = cache.get(q);
+  return found && { ...found };
+}
+
+// Smallest distance d at which a name of length len scores 1 - d / len <= floor, i.e. can't change anything.
+function stopDistance(floor, len) {
+  if (floor === -Infinity) return Infinity;
+  let d = Math.max(0, Math.ceil((1 - floor) * len) - 1);
+  while (1 - d / len > floor) d++;
+  return d;
+}
+
+function findBestMatch(q, cat) {
   let best = null, second = null;
-  for (const v of matchIndex()) {
+  for (const v of matchIndex(cat)) {
     if (Math.abs(v.norm.length - q.length) > Math.max(4, q.length * 0.4)) continue;
-    const score = 1 - levenshtein(q, v.norm) / Math.max(q.length, v.norm.length);
+    // Only a score above this can change best or second, so the distance is worked out no further than that.
+    const floor = best && v.item === best.item ? best.score : (second?.score ?? -Infinity);
+    const len = Math.max(q.length, v.norm.length);
+    const score = 1 - levenshtein(q, v.norm, stopDistance(floor, len)) / len;
     if (!best || score > best.score) {
       if (best && best.item !== v.item) second = best;
       best = { item: v.item, score };
@@ -475,7 +600,7 @@ function bestMatch(text) {
   // that's left of the distinctive part ("5 Prime 刀刃" when 翁 or 关刀 was lost, as many names end "Prime 刀刃").
   const fitsSeveral = (part) => {
     const containing = new Set();
-    for (const v of matchIndex()) if (v.norm !== q && v.norm.includes(part)) containing.add(v.item);
+    for (const v of matchIndex(cat)) if (v.norm !== q && v.norm.includes(part)) containing.add(v.item);
     return containing.size >= 2;
   };
   const cores = [q.slice(1).trim(), q.slice(0, -1).trim()].filter((c) => textWeight(c, true) >= 4);
@@ -513,7 +638,7 @@ const isBetter = (a, b) => matchQuality(a) > matchQuality(b) || (!!a && !!b && m
 // than 3 letters are ignored, and the first/last line may be dropped, at a cost so a full reading wins.
 // A refinement word ("Radiant") is tried both as part of the name and removed, since some item names
 // contain such words ("Radiant Finish"); it only counts for relics.
-function matchDetection(d) {
+function matchDetection(d, cat = $('#scanCategory').value) {
   const lines = d.segs.filter((s) => textWeight(s) >= 3);
   let subtype = null;
   const stripped = lines.map((l) => {
@@ -528,7 +653,7 @@ function matchDetection(d) {
     const tries = [[ls, 0]];
     if (ls.length > 1) tries.push([ls.slice(1), 0.12], [ls.slice(0, -1), 0.12]);
     for (const [t, penalty] of tries) {
-      const m = t.length ? bestMatch(t.join(' ')) : null;
+      const m = t.length ? bestMatch(t.join(' '), cat) : null;
       if (!m) continue;
       if (sub && !m.item.subtypes?.includes(sub)) continue;
       m.score -= penalty;
@@ -542,42 +667,73 @@ function matchDetection(d) {
 }
 
 // Re-reads each name area (taller, to catch a first or last line the screen pass missed) as one block,
-// and keeps that reading when it matches better.
-async function rereadNames(worker, canvas, scale, detections, textH) {
-  await worker.setParameters(TILE_PARAMS);
+// and keeps that reading when it matches better. Within each step, all areas are read at the same time and the
+// readings then applied in order, exactly as if they had been read one after another.
+async function rereadNames(ocr, canvas, scale, detections, textH, cat) {
   const imgW = canvas.width / scale, imgH = canvas.height / scale;
-  for (const d of detections) {
-    if (!d.match && textWeight(d.segs.join('')) < 5) continue; // stray letters, not a name
-    const padX = (d.x1 - d.x0) * 0.15;
-    const r = { x0: Math.max(0, d.x0 - padX), y0: Math.max(0, d.y0 - textH * 1.3), x1: Math.min(imgW, d.x1 + padX), y1: Math.min(imgH, d.y1 + textH * 1.3) };
-    d.area = r;
-    // An exact, clear match can't be improved on, so it isn't read again (relics are, for a refinement line).
-    if (matchQuality(d.match) >= 1 && !d.match.item.subtypes) continue;
-    const { text } = await recognizeArea(worker, canvas, scale, r);
-    const reread = { segs: text.split('\n').map((s) => s.trim()).filter(Boolean) };
-    matchDetection(reread);
-    if (isBetter(reread.match, d.match)) {
-      Object.assign(d, { segs: reread.segs, text: reread.text, norm: reread.norm, match: reread.match });
-    }
-  }
-  // A name whose middle wasn't read falls apart into two pieces side by side. Two unclear pieces on one line
-  // are read again together, and replaced by that reading only if it's a clear match.
+  const readTile = (image, output) => ocrJob(ocr, image, TILE_PARAMS, output);
+  // Area around a box, padX to each side; reads it on the image the detection came from.
+  const around = (b, padX) => ({ x0: Math.max(0, b.x0 - padX), y0: Math.max(0, b.y0 - textH * 1.3), x1: Math.min(imgW, b.x1 + padX), y1: Math.min(imgH, b.y1 + textH * 1.3) });
+  const readArea = async (d, r) => {
+    const src = d.source ?? { canvas, scale };
+    const { text } = await recognizeArea(readTile, src.canvas, src.scale, r);
+    const reading = { segs: text.split('\n').map((s) => s.trim()).filter(Boolean) };
+    matchDetection(reading, cat);
+    return reading;
+  };
   const weak = (d) => (!d.match || d.match.ambiguous) && textWeight(d.segs.join('')) >= 3;
-  for (const a of [...detections]) {
-    for (const b of [...detections]) {
-      if (a === b || a.joined || b.joined || !weak(a) || !weak(b)) continue;
+  // Readings started ahead that may turn out not to be needed: a failure counts only if it's awaited.
+  const ahead = (p) => { p.catch(() => {}); return p; };
+
+  // 1. Every name, read again as a block in a slightly wider area (taller, to catch a missed first or last line).
+  const step1 = detections.filter((d) => d.match || textWeight(d.segs.join('')) >= 5); // else stray letters, not a name
+  for (const d of step1) d.area = around(d, (d.x1 - d.x0) * 0.15);
+  // An exact, clear match can't be improved on, so it isn't read again (relics are, for a refinement line).
+  const toReread = step1.filter((d) => !(matchQuality(d.match) >= 1 && !d.match.item.subtypes));
+  const rereads = await Promise.all(toReread.map((d) => readArea(d, d.area)));
+  toReread.forEach((d, i) => {
+    const reread = rereads[i];
+    if (isBetter(reread.match, d.match)) Object.assign(d, { segs: reread.segs, text: reread.text, norm: reread.norm, match: reread.match });
+  });
+
+  // 2. A name whose middle wasn't read falls apart into two pieces side by side. Two unclear pieces on one line
+  //    are read again together, and replaced by that reading only if it's a clear match.
+  const pairs = [];
+  for (const a of detections) {
+    for (const b of detections) {
+      if (a === b || !weak(a) || !weak(b)) continue;
       const gap = b.x0 - a.x1;
       if (gap <= 0 || gap > textH * 4 || Math.abs((a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2) > textH) continue;
       const u = box([a, b]);
-      const r = { x0: Math.max(0, u.x0 - textH), y0: Math.max(0, u.y0 - textH * 1.3), x1: Math.min(imgW, u.x1 + textH), y1: Math.min(imgH, u.y1 + textH * 1.3) };
-      const { text } = await recognizeArea(worker, canvas, scale, r);
-      const joined = { ...u, segs: text.split('\n').map((s) => s.trim()).filter(Boolean), qty: 1, countBox: null, area: r };
-      matchDetection(joined);
-      if (joined.match && !joined.match.ambiguous && joined.match.score >= 0.8) {
-        a.joined = b.joined = true;
-        detections.push(joined);
-      }
+      const r = around(u, textH);
+      pairs.push({ a, b, u, r, reading: ahead(readArea(a, r)) });
     }
+  }
+  for (const { a, b, u, r, reading } of pairs) {
+    if (a.joined || b.joined) continue;
+    const joined = { ...u, ...(await reading), qty: 1, countBox: null, area: r, source: a.source };
+    if (joined.match && !joined.match.ambiguous && joined.match.score >= 0.8) {
+      a.joined = b.joined = true;
+      detections.push(joined);
+    }
+  }
+
+  // 3. A piece that's still unclear may be all that was read of a longer name ("Seqlence" when "Toxic" was lost
+  //    on the card art): it's read once more with as much room again on each side. A clear match takes over the
+  //    unclear pieces in that strip, and its box grows to cover them, so its count is looked for in the right tile.
+  const step3 = detections.filter((d) => !d.joined && weak(d) && textWeight(d.segs.join('')) >= 5)
+    .map((d) => { const r = around(d, d.x1 - d.x0); return { d, r, reading: ahead(readArea(d, r)) }; });
+  for (const { d, r, reading } of step3) {
+    if (d.joined) continue; // taken over by an earlier piece's reading
+    const reread = await reading;
+    if (!reread.match || reread.match.ambiguous || !isBetter(reread.match, d.match)) continue;
+    const inStrip = (o) => o !== d && !o.joined && weak(o) && (o.x0 + o.x1) / 2 > r.x0 && (o.x0 + o.x1) / 2 < r.x1
+      && Math.abs((o.y0 + o.y1) / 2 - (d.y0 + d.y1) / 2) < textH;
+    for (const o of detections.filter(inStrip)) {
+      o.joined = true;
+      Object.assign(d, { x0: Math.min(d.x0, o.x0), y0: Math.min(d.y0, o.y0), x1: Math.max(d.x1, o.x1), y1: Math.max(d.y1, o.y1) });
+    }
+    Object.assign(d, { segs: reread.segs, text: reread.text, norm: reread.norm, match: reread.match, area: r });
   }
   detections = detections.filter((d) => !d.joined);
 
@@ -618,18 +774,18 @@ function enqueue(shot) {
   }
 }
 
-// Each slot reads one screenshot at a time with its own worker, until nothing is waiting.
+// Each slot reads one screenshot at a time, until nothing is waiting.
 async function runSlot(slot) {
   while (scan.pending.length) {
     const shot = scan.pending.shift();
-    if (!scan.shots.includes(shot)) continue; // removed while queued
+    if (!scan.shots.includes(shot) && shot !== quick.shot) continue; // removed (or replaced) while queued
     scan.busy[slot] = shot;
-    await scanShot(shot, slot).catch(() => {});
+    await scanShot(shot).catch(() => {});
     scan.busy[slot] = null;
   }
 }
 
-async function scanShot(shot, slot) {
+async function scanShot(shot) {
   shot.status = 'scanning';
   shot.progress = 0;
   renderShots();
@@ -640,12 +796,23 @@ async function scanShot(shot, slot) {
   try {
     shot.img ??= await loadImage(shot.file);
     await ensureNames();
-    const worker = await getWorker(slot);
+    const ocr = GAME_LANGS[scan.lang].ocr;
     lap('setup');
 
     // Pass 1: brightness threshold.
     let { canvas, scale } = preprocess(shot.img, Number($('#scanThreshold').value));
-    const first = await readNames(worker, canvas, scale);
+    // A quick price check looks for any item, whatever the scanner's "Looking for" is set to.
+    const cat = shot.quick ? 'quick' : $('#scanCategory').value;
+    const reading1 = readNames(ocr, canvas, scale, cat, NAME_PARAMS, shot);
+    // A quick check is often a reward screen with mod cards, which need the white-text pass below. A reward screen
+    // is small, so workers are free now: that pass starts straight away, and is used only if it's needed.
+    const whiteImage = () => binarize(shot.img, isWhiteText, shot.img.naturalWidth <= 1400 ? 3 : 2);
+    let early = null;
+    if (shot.quick) {
+      const white = whiteImage();
+      early = readNames(ocr, white.canvas, white.scale, cat, BLOCK_PARAMS).then((reading) => ({ white, reading }), () => null);
+    }
+    const first = await reading1;
     let { detections, textH } = first;
     lap('read');
 
@@ -657,14 +824,28 @@ async function scanShot(shot, slot) {
       if (!looksComplete(first.detections, first.textH)) {
         shot.status = 'refining';
         renderShots();
-        const second = await readNames(worker, canvas, scale);
+        const second = await readNames(ocr, withoutSureNames(canvas, scale, first.detections, first.textH), scale, cat, NAME_PARAMS, shot);
         detections = mergeDetections([...second.detections, ...first.detections]);
         textH = second.textH || textH;
         lap('colour');
       }
     }
+    // Few clear names so far: maybe white names on mod cards. They're read on their own image and keep it
+    // (source) for the re-read below; the inventory passes keep using the cleanest image of theirs.
+    if (detections.filter((d) => d.match && !d.match.ambiguous && d.match.score >= 0.9).length < 4) {
+      shot.status = 'refining';
+      renderShots();
+      let { white, reading: third } = (await early) ?? {};
+      if (!third) {
+        white = whiteImage();
+        third = await readNames(ocr, white.canvas, white.scale, cat, BLOCK_PARAMS, shot);
+      }
+      for (const d of third.detections) d.source = white;
+      detections = mergeDetections([...third.detections, ...detections]);
+      lap('white');
+    }
     shot.processed = canvas;
-    detections = await rereadNames(worker, canvas, scale, detections, textH);
+    detections = await rereadNames(ocr, canvas, scale, detections, textH, cat);
     lap('reread');
 
     shot.status = 'counting';
@@ -679,22 +860,305 @@ async function scanShot(shot, slot) {
   }
   shot.seconds = (performance.now() - start) / 1000;
   shot.timings = timings;
+  if (shot.quick) { quickDone(shot); return; }
   renderShots();
   aggregate();
 }
 
-async function readNames(worker, canvas, scale) {
-  await worker.setParameters(NAME_PARAMS);
-  const { data } = await worker.recognize(canvas, {}, { blocks: true });
-  const { detections, textH } = analyze(wordsFrom(data), scale);
-  detections.forEach(matchDetection);
+// ---------- quick price check: one screenshot, the lowest online price of each item on it ----------
+
+const quick = { shot: null, items: [], loading: false, unclear: 0, thumb: null };
+
+function quickCheck(file) {
+  if (!file?.type?.startsWith('image/')) return;
+  // The screenshot it replaces is let go (a screenshot of a whole screen is a few MB).
+  if (quick.shot?.img) URL.revokeObjectURL(quick.shot.img.src);
+  if (quick.thumb) URL.revokeObjectURL(quick.thumb);
+  quick.thumb = URL.createObjectURL(file);
+  quick.shot = { id: scan.nextId++, name: file.name || 'pasted.png', file, time: file.lastModified || Date.now(), img: null, status: 'queued', progress: 0, detections: [], quick: true };
+  quick.items = [];
+  quick.unclear = 0;
+  screenCapture.help = false;
+  renderQuick();
+  enqueue(quick.shot);
+}
+
+async function quickDone(shot) {
+  if (shot !== quick.shot) return; // a newer screenshot replaced it
+  const byKey = new Map();
+  for (const d of shot.detections) {
+    if (!d.match || d.match.ambiguous) continue;
+    const item = d.match.item;
+    const subtype = d.match.subtype ?? (item.subtypes ? item.subtypes[0] : null);
+    byKey.set(`${item.slug}|${subtype ?? ''}`, { item, subtype, entry: item.notOnMarket ? null : { slug: item.slug, rank: item.maxRank !== null ? 0 : null, subtype }, price: undefined });
+  }
+  // Names that fit several items: counted, never guessed. (Other unmatched text is the game's own UI.)
+  quick.unclear = shot.detections.filter((d) => d.match?.ambiguous).length;
+  quick.items = [...byKey.values()];
+  quick.loading = true;
+  renderQuick();
+  for (const q of quick.items) {
+    if (shot !== quick.shot) return;
+    if (!q.entry) continue; // not traded on warframe.market: nothing to ask
+    await fetchPrice(q.entry);
+    q.price = state.prices.get(rowKey(q.entry));
+    renderQuick();
+  }
+  quick.loading = false;
+  renderQuick();
+}
+
+// The line under the screenshot buttons: the countdown, reading progress, or what came of it, next to a
+// thumbnail of the screenshot (so a screenshot of the wrong screen is easy to spot).
+function renderQuickStatus() {
+  const shot = quick.shot;
+  let text = '';
+  if (screenCapture.timer) text = t('Screenshot in {n}…', { n: Math.max(1, Math.ceil((screenCapture.at - Date.now()) / 1000)) });
+  else if (screenCapture.help) text = t('Click "Take screenshot" first, so your browser can ask which screen to share.');
+  else if (shot && BUSY.includes(shot.status)) text = t('Reading the screenshot… {n}%', { n: Math.round(shot.progress * 100) });
+  else if (shot?.status === 'error') text = `${t('error')}: ${shot.error}`;
+  else if (quick.loading) text = t('Checking prices…');
+  else if (shot && !quick.items.length) text = t('No items found on this screenshot.');
+  else if (shot) text = t('Screenshot from {time}', { time: new Date(shot.time).toLocaleTimeString(INTL_LOCALE[pageLang]) });
+  $('#quickStatus').textContent = text;
+  $('#quickShot').hidden = !text;
+  const thumb = $('#quickThumb');
+  if (quick.thumb && thumb.getAttribute('src') !== quick.thumb) thumb.src = quick.thumb;
+  thumb.hidden = !quick.thumb || !!screenCapture.timer || screenCapture.help;
+}
+
+function renderQuick() {
+  renderQuickStatus();
+  const shot = quick.shot;
+  const priceOf = (q) => q.price?.lowestSell ?? null;
+  const sorted = [...quick.items].sort((a, b) => (priceOf(b) ?? -1) - (priceOf(a) ?? -1) || itemName(a.item).localeCompare(itemName(b.item)));
+  fill($('#quickResults'), sorted.map((q) => h('li', null,
+    q.item.thumb ? h('img', { src: ASSETS + q.item.thumb, alt: '', loading: 'lazy' }) : h('span', { class: 'thumb-missing' }),
+    h('span', { class: 'quick-name' }, itemName(q.item),
+      q.subtype && q.item.tags.includes('relic') && h('span', { class: 'tag' }, t(q.subtype)),
+      q.entry?.rank === 0 && h('span', { class: 'tag', title: t("Screenshots don't show mod and arcane ranks: enter them in the Rank column before listing") }, t('rank 0'))),
+    h('span', { class: 'quick-values' },
+      q.item.notOnMarket ? h('span', { class: 'muted' }, t('not on warframe.market'))
+        : q.price === undefined ? h('span', { class: 'muted' }, '…')
+        : priceOf(q) === null ? h('span', { class: 'muted' }, q.price?.error ? t('error') : t('none online'))
+          : h('b', { class: 'quick-price plat', title: t('Lowest sell') }, `${priceOf(q)}p`),
+      q.item.ducats ? h('span', { class: 'quick-ducats ducats', title: t('Ducats') }, t('{n} ducats', { n: q.item.ducats })) : null))));
+  $('#quickNote').hidden = !quick.unclear || !shot || shot.status !== 'done';
+  $('#quickNote').textContent = t("{n} names couldn't be read for sure, so they're left out.", { n: quick.unclear });
+}
+
+// ---------- screenshot shortcut: the game's screen, straight into the quick price check ----------
+
+// A screen is shared with this page once: browsers ask which one, and only after a click. From then on the
+// shortcut (passed on by the background script) or the button waits the delay, so you can switch to the game,
+// then takes the screen as it is and checks it. The picture stays in this page. Sharing ends with "Stop
+// sharing", here or in the browser's own bar, or when the page closes.
+const screenCapture = { stream: null, video: null, timer: null, ticker: null, at: 0, help: false, sound: null, shortcut: '' };
+const CAPTURE_DELAYS = [0, 1, 2, 3, 5]; // seconds
+const IS_FIREFOX = typeof browser.runtime.getBrowserInfo === 'function'; // its shortcuts only work while it's in front
+const screenShared = () => !!screenCapture.stream;
+
+async function shareScreen() {
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: { displaySurface: 'monitor', frameRate: { ideal: 2, max: 5 } }, // stills are all that's needed
+    audio: false,
+    selfBrowserSurface: 'exclude', // Chrome / Edge: don't offer this tab
+  });
+  const video = document.createElement('video');
+  video.muted = true;
+  video.srcObject = stream;
+  try {
+    await video.play();
+  } catch (err) {
+    stream.getTracks().forEach((track) => track.stop());
+    throw err;
+  }
+  stream.getVideoTracks()[0].addEventListener('ended', stopSharing); // stopped from the browser's own bar
+  warmUp();
+  screenCapture.stream = stream;
+  screenCapture.video = video;
+  screenCapture.help = false;
+}
+
+function stopSharing() {
+  clearCountdown();
+  screenCapture.stream?.getTracks().forEach((track) => track.stop());
+  if (screenCapture.video) screenCapture.video.srcObject = null;
+  screenCapture.stream = screenCapture.video = null;
+  screenCapture.sound?.close().catch(() => {});
+  screenCapture.sound = null;
+  renderCapture();
+}
+
+async function onCaptureClick() {
+  // The click sound needs a click to be allowed; made here, it can play when the screenshot is taken.
+  try { screenCapture.sound ??= new AudioContext(); } catch { /* no sound then */ }
+  if (screenCapture.sound?.state === 'suspended') screenCapture.sound.resume().catch(() => {});
+  if (!screenShared()) {
+    try {
+      await shareScreen();
+    } catch (err) {
+      stopSharing();
+      setStatus(err.name === 'NotAllowedError' ? t("The screen wasn't shared.") : `${t("The screen wasn't shared.")} (${err.message})`);
+      return;
+    }
+  }
+  captureSoon();
+}
+
+// The shortcut or the button: count down, then take the screenshot. Without a shared screen, says what to do.
+function captureSoon() {
+  showTab('quick');
+  if (!screenShared()) {
+    screenCapture.help = true;
+    renderCapture();
+    return;
+  }
+  if (screenCapture.timer) return; // already counting down
+  const delay = Number($('#captureDelay').value) * 1000;
+  screenCapture.at = Date.now() + delay;
+  screenCapture.timer = setTimeout(takeScreenshot, delay);
+  screenCapture.ticker = setInterval(renderQuickStatus, 250);
+  renderCapture();
+}
+
+function clearCountdown() {
+  clearTimeout(screenCapture.timer);
+  clearInterval(screenCapture.ticker);
+  screenCapture.timer = screenCapture.ticker = null;
+}
+
+async function takeScreenshot() {
+  clearCountdown();
+  const { video } = screenCapture;
+  if (!video?.videoWidth) { renderCapture(); return; }
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  const takenAt = Date.now();
+  shutterSound();
+  renderCapture();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  quickCheck(new File([blob], 'screenshot.png', { type: 'image/png', lastModified: takenAt }));
+}
+
+// A short, soft click when the screenshot is taken: by then you're probably looking at the game.
+function shutterSound() {
+  const ctx = screenCapture.sound;
+  if (ctx?.state !== 'running') return;
+  const now = ctx.currentTime;
+  const tone = ctx.createOscillator();
+  const gain = ctx.createGain();
+  tone.type = 'triangle';
+  tone.frequency.setValueAtTime(1400, now);
+  tone.frequency.exponentialRampToValueAtTime(600, now + 0.08);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.2, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+  tone.connect(gain).connect(ctx.destination);
+  tone.start(now);
+  tone.stop(now + 0.13);
+}
+
+// The shortcut as set in the browser (people can change it there).
+async function loadShortcut() {
+  try {
+    screenCapture.shortcut = (await browser.commands.getAll()).find((c) => c.name === 'quick-capture')?.shortcut ?? '';
+  } catch {
+    screenCapture.shortcut = '';
+  }
+  renderCapture();
+}
+
+function openShortcutSettings() {
+  if (typeof browser.commands.openShortcutSettings === 'function') return browser.commands.openShortcutSettings();
+  return browser.tabs.create({ url: `${/\bEdg\//.test(navigator.userAgent) ? 'edge' : 'chrome'}://extensions/shortcuts` });
+}
+
+function renderCapture() {
+  const sharing = screenShared();
+  $('#captureBtn').disabled = !!screenCapture.timer;
+  $('#captureStop').hidden = !sharing;
+  const seconds = new Intl.NumberFormat(INTL_LOCALE[pageLang], { style: 'unit', unit: 'second', unitDisplay: 'short' });
+  for (const option of $('#captureDelay').options) option.textContent = seconds.format(Number(option.value));
+  const keys = screenCapture.shortcut ? screenCapture.shortcut.split('+') : [];
+  const canChange = typeof browser.commands.openShortcutSettings === 'function' || !IS_FIREFOX;
+  fill($('#captureKey'), t('Shortcut:'), ' ',
+    keys.length ? keys.map((k, i) => [i ? '+' : '', h('kbd', null, k)]) : t('not set'),
+    ' · ', IS_FIREFOX ? t('works while the browser is in front') : t('works in the game too'),
+    canChange && [' · ', h('a', { href: '#', 'data-action': 'change-shortcut' }, t('change'))]);
+  $('#captureHint').textContent = sharing
+    ? t('Sharing your screen with this page. Screenshots never leave this computer.')
+    : t('The first time, your browser asks which screen to share: pick the one the game is on.');
+  renderQuickStatus();
+}
+
+function wireCapture() {
+  if (!navigator.mediaDevices?.getDisplayMedia) { $('#captureBar').hidden = $('#captureHint').hidden = true; return; }
+  const delay = $('#captureDelay');
+  delay.append(...CAPTURE_DELAYS.map((s) => h('option', { value: s })));
+  delay.value = storageGet('captureDelay', '2');
+  if (!delay.value) delay.value = '2';
+  delay.addEventListener('change', () => storageSet('captureDelay', delay.value));
+  $('#captureBtn').addEventListener('click', onCaptureClick);
+  $('#captureStop').addEventListener('click', stopSharing);
+  $('#captureKey').addEventListener('click', (ev) => {
+    if (ev.target.dataset.action !== 'change-shortcut') return;
+    ev.preventDefault();
+    openShortcutSettings();
+  });
+  window.addEventListener('focus', loadShortcut); // it may have been changed in the browser's settings meanwhile
+  renderCapture();
+  loadShortcut();
+  // Opened by the shortcut, with no app tab open yet
+  if (location.hash === '#capture') {
+    history.replaceState(null, '', location.pathname + location.search);
+    captureSoon();
+  }
+}
+
+// A whole prepared screenshot is read in horizontal bands, one per worker, side by side. Bands overlap by more
+// than a line of text, and each word is kept from the band whose own part holds its centre: there it's whole.
+const BAND_MIN = 400; // canvas pixels; smaller images are read in one piece
+async function readInBands(ocr, canvas, params, shot) {
+  const n = Math.max(1, Math.min(OCR_WORKERS, Math.floor(canvas.height / BAND_MIN)));
+  const overlap = Math.round(Math.max(120, canvas.height * 0.04));
+  const progress = new Array(n).fill(0);
+  const bands = await Promise.all(Array.from({ length: n }, async (_, i) => {
+    const own0 = Math.round((canvas.height * i) / n), own1 = Math.round((canvas.height * (i + 1)) / n);
+    const y0 = n === 1 ? 0 : Math.max(0, own0 - overlap), y1 = n === 1 ? canvas.height : Math.min(canvas.height, own1 + overlap);
+    let image = canvas;
+    if (n > 1) {
+      image = document.createElement('canvas');
+      image.width = canvas.width;
+      image.height = y1 - y0;
+      image.getContext('2d').drawImage(canvas, 0, y0, canvas.width, y1 - y0, 0, 0, canvas.width, y1 - y0);
+    }
+    const data = await ocrJob(ocr, image, params, { blocks: true }, (p) => {
+      progress[i] = p;
+      if (shot) { shot.progress = progress.reduce((a, b) => a + b, 0) / n; renderShotsSoon(); }
+    });
+    return wordsFrom(data)
+      .map((w) => ({ text: w.text, confidence: w.confidence, bbox: { x0: w.bbox.x0, x1: w.bbox.x1, y0: w.bbox.y0 + y0, y1: w.bbox.y1 + y0 } }))
+      .filter((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return cy >= own0 && cy < own1; });
+  }));
+  return bands.flat();
+}
+
+async function readNames(ocr, canvas, scale, cat, params = NAME_PARAMS, shot = null) {
+  const { detections, textH } = analyze(await readInBands(ocr, canvas, params, shot), scale);
+  detections.forEach((d) => matchDetection(d, cat));
   return { detections, textH };
 }
 
-// Detections from both passes describe the same tiles; where boxes overlap, keep the better match.
+// Detections from several passes describe the same tiles; where boxes overlap, keep the better match. Between
+// two readings that match nothing, keep the one with more text: a piece of a name ("Bronco Prime") rather than
+// a bit of item art read as letters, which it can still be completed from.
 function mergeDetections(all) {
   const kept = [];
-  for (const d of [...all].sort((a, b) => matchQuality(b.match) - matchQuality(a.match))) {
+  const order = (a, b) => matchQuality(b.match) - matchQuality(a.match) || textWeight(b.segs.join('')) - textWeight(a.segs.join(''));
+  for (const d of [...all].sort(order)) {
     if (!kept.some((k) => boxesOverlap(k, d))) kept.push(d);
   }
   return kept;
@@ -769,7 +1233,7 @@ function renderShots() {
   $('#scanResults').hidden = scan.shots.length === 0;
   const busy = scan.shots.some((s) => BUSY.includes(s.status));
   $('#scanStatus').textContent = busy
-    ? (scan.workers.some(Boolean) ? t('Reading screenshots…') : t('Loading text recognition (first time takes a few seconds)…'))
+    ? (pools.size ? t('Reading screenshots…') : t('Loading text recognition (first time takes a few seconds)…'))
     : '';
 }
 
@@ -777,7 +1241,7 @@ let shotsQueued = false;
 function renderShotsSoon() {
   if (shotsQueued) return;
   shotsQueued = true;
-  requestAnimationFrame(() => { shotsQueued = false; renderShots(); });
+  requestAnimationFrame(() => { shotsQueued = false; renderShots(); if (quick.shot) renderQuickStatus(); });
 }
 
 function renderScanRows() {
@@ -871,6 +1335,8 @@ function addScanToList() {
 
 // Called by the page when its language changes.
 function renderScanTexts() {
+  renderQuick();
+  renderCapture();
   renderShots();
   renderScanRows();
   renderPreview();
@@ -883,6 +1349,7 @@ function wireScan() {
   drop.addEventListener('click', () => $('#scanFiles').click());
   $('#scanFiles').addEventListener('change', (ev) => { addShots([...ev.target.files]); ev.target.value = ''; });
   drop.addEventListener('dragover', (ev) => { ev.preventDefault(); drop.classList.add('over'); });
+  document.addEventListener('dragenter', warmUp); // a screenshot is on its way
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
   drop.addEventListener('drop', (ev) => {
     ev.preventDefault();
@@ -893,8 +1360,21 @@ function wireScan() {
     const files = [...(ev.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
     if (!files.length) return;
     ev.preventDefault();
+    if (activeTab() === 'quick') { quickCheck(files[0]); return; }
     addShots(files);
     $('#scanCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  // Quick price check: drop, click to choose, or paste (above).
+  const quickDrop = $('#quickDrop');
+  quickDrop.addEventListener('click', () => $('#quickFile').click());
+  $('#quickFile').addEventListener('change', (ev) => { quickCheck(ev.target.files[0]); ev.target.value = ''; });
+  quickDrop.addEventListener('dragover', (ev) => { ev.preventDefault(); quickDrop.classList.add('over'); });
+  quickDrop.addEventListener('dragleave', () => quickDrop.classList.remove('over'));
+  quickDrop.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    quickDrop.classList.remove('over');
+    quickCheck([...ev.dataTransfer.files].find((f) => f.type.startsWith('image/')));
   });
 
   $('#shots').addEventListener('click', (ev) => {
@@ -919,17 +1399,30 @@ function wireScan() {
   setLanguage(storageGet('scanLang', guessLanguage()));
   langSelect.value = scan.lang;
   flagPicker(langSelect);
+  // The quick price check has its own picker for the same setting.
+  const quickLang = $('#quickLang');
+  quickLang.append(...Object.entries(GAME_LANGS).map(([code, l]) => h('option', { value: code }, l.label)));
+  quickLang.value = scan.lang;
+  flagPicker(quickLang);
+  quickLang.addEventListener('change', () => {
+    if (langSelect.value === quickLang.value) return;
+    langSelect.value = quickLang.value;
+    langSelect.dispatchEvent(new Event('change'));
+  });
   langSelect.addEventListener('change', () => {
     setLanguage(langSelect.value);
     storageSet('scanLang', scan.lang);
+    quickLang.value = scan.lang;
+    quickLang.syncPicker();
     scan.shots.forEach(enqueue);
+    if (quick.shot) { quick.items = []; enqueue(quick.shot); renderQuick(); }
     renderShots();
   });
 
   $('#scanThreshold').addEventListener('input', () => { $('#scanThresholdVal').textContent = $('#scanThreshold').value; });
   $('#scanRescan').addEventListener('click', () => { scan.shots.forEach(enqueue); renderShots(); });
   $('#scanCategory').addEventListener('change', () => {
-    for (const s of scan.shots) s.detections.forEach(matchDetection);
+    for (const s of scan.shots) s.detections.forEach((d) => matchDetection(d));
     aggregate();
   });
   $('#scanProcessed').addEventListener('change', renderPreview);
@@ -946,6 +1439,7 @@ function wireScan() {
     renderPreview();
   });
   $('#scanAdd').addEventListener('click', addScanToList);
+  wireCapture();
 
   $('#scanTable tbody').addEventListener('change', (ev) => {
     const field = ev.target.dataset.field;

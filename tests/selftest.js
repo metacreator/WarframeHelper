@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate, history, computeSets, LOCALES, openDialog, t */
+/* global browser, state, scan, addShots, rowKey, loadListings, importBackup, Backend, renderPreview, POOL_SIZE, addEntries, buildRow, underpriced, listEntry, listAllUnlisted, render, repriceListings, aggregate, history, computeSets, LOCALES, openDialog, t, quickCheck, quick, screenCapture, screenShared */
 // TEST BUILD ONLY: drives app.html from inside the add-on (WebDriver can't script extension pages)
 // and reports results to the mock server. The runner sets/clears the warframe.market cookie when asked.
 (async () => {
@@ -40,7 +40,7 @@
     await sleep(600); await capture('welcome');
     const headerPicker = document.querySelector('.page-lang + details, .page-lang details') ?? document.getElementById('pageLang').parentElement.querySelector('details');
     headerPicker.open = true; await sleep(300); await capture('language-picker'); headerPicker.open = false;
-    await report('language pickers show flags', document.querySelectorAll('.picker-list img.flag').length === 10
+    await report('language pickers show flags', document.querySelectorAll('.picker-list img.flag').length === 15 // page, game and quick-check pickers
       && headerPicker.querySelector('summary img.flag').src.endsWith('/gb.svg'), [...document.querySelectorAll('.picker-label')].map((x) => x.textContent).join(' | '));
     await report('not connected before login', !state.auth.connected, state.auth.reason);
 
@@ -195,15 +195,16 @@
     await until(() => !state.inventory.some((e) => e.slug === 'kogake_prime_boot'), 10000, 'confirm sold');
     await report('confirming the sale removes the row', true, `${state.inventory.length} rows`);
 
-    // Background script has the backend and sees the login
+    // Nothing runs in the background once the page is closed: the background script only answers the toolbar
+    // button and the shortcut (no timers, no alarm permission); the page refreshes prices once they're an hour old.
     try {
       // Firefox runs it as a background page; Chrome and Edge as a service worker, which a page can't look into.
       const bg = browser.runtime.getBackgroundPage ? await browser.runtime.getBackgroundPage().catch(() => null) : null;
-      const alarm = await browser.alarms.get('check-orders');
-      await report('background script loaded and sale checks scheduled', (!bg || (typeof bg.notifySales === 'function' && typeof bg.t === 'function'))
-        && alarm?.periodInMinutes === 3, `${bg ? 'background page' : 'service worker'} ${JSON.stringify(alarm)}`);
+      await report('background script has no timers; prices refresh hourly while the page is open',
+        (!bg || (typeof bg.onCommand === 'function' && bg.notifySales === undefined && bg.Backend === undefined))
+        && !browser.alarms && Backend.PRICE_TTL_MINUTES === 60, `${bg ? 'background page' : 'service worker'}, alarms API: ${typeof browser.alarms}`);
     } catch (e) {
-      await report('background script loaded and sale checks scheduled', false, e.message);
+      await report('background script has no timers; prices refresh hourly while the page is open', false, e.message);
     }
 
     // Backup export contents + import of an old local-app file
@@ -393,7 +394,7 @@
     window.scrollTo(0, 0); await sleep(300); await capture('ukrainian-top');
     document.getElementById('listedSection').scrollIntoView(); await sleep(300); await capture('ukrainian-table');
     await report('the trade chat message keeps the English names', /\[Akstiletto Prime Blueprint\]/.test(document.getElementById('tradeMsg').value), document.getElementById('tradeMsg').value.slice(0, 120));
-    await report('the language choice is saved for notifications too', (await Backend.getSettings({ fresh: true })).pageLang === 'uk' && localStorage.getItem('pageLang') === 'uk');
+    await report('the language choice is saved in the add-on settings too', (await Backend.getSettings({ fresh: true })).pageLang === 'uk' && localStorage.getItem('pageLang') === 'uk');
     pageLang.value = 'en';
     pageLang.dispatchEvent(new Event('change'));
     await until(() => document.querySelector('#scanCard h2').textContent === 'Scan screenshots' && state.names === null, 10000, 'back to English');
@@ -410,6 +411,117 @@
     await sleep(400); await capture('dialog');
     document.getElementById('dialog').close('cancel');
     await report('page dialogs open and answer', (await dialogAnswer) === false && rowMenuEl.querySelectorAll('.menu-item').length >= 3);
+
+    // Quick price check: one screenshot in, each item with its lowest online price out; nothing is added
+    const inventoryBefore = state.inventory.length;
+    document.querySelector('.tabs [data-tab=quick]').click();
+    document.getElementById('scanCategory').value = 'Mod'; // the scanner's filter must not limit a quick check
+    quickCheck(new File([await (await fetch(`${MOCK}/lang-en.png`)).blob()], 'lang-en.png', { type: 'image/png' }));
+    await until(() => quick.shot?.status === 'done' && !quick.loading, 120000, 'quick price check');
+    window.scrollTo(0, 0); await sleep(400); await capture('quick-check');
+    const quickRows = [...document.querySelectorAll('#quickResults li')];
+    await report('quick price check shows each item with its lowest price, and adds nothing', quickRows.length >= 10
+      && quickRows.some((li) => li.querySelector('.quick-name').textContent.startsWith('Ash Prime Systems Blueprint'))
+      && quickRows.some((li) => li.querySelector('.quick-price')) && state.inventory.length === inventoryBefore
+      && /65 ducats/.test(quickRows.find((li) => li.textContent.startsWith('Ash Prime Systems Blueprint'))?.textContent ?? '')
+      && !document.getElementById('tabQuick').hidden && document.getElementById('tabInventory').hidden,
+      quickRows.map((li) => li.textContent).join(' | '));
+    // Mod cards (white names over card art), from a real reward screen: the four tradable mods, nothing else
+    quickCheck(new File([await (await fetch(`${MOCK}/mods-pick.png`)).blob()], 'mods-pick.png', { type: 'image/png' }));
+    await until(() => quick.shot?.name === 'mods-pick.png' && quick.shot.status === 'done' && !quick.loading, 120000, 'mod card check');
+    const modSlugs = quick.items.map((q) => q.item.slug).sort();
+    await report('mod cards on a real reward screen: all four mods, nothing else', modSlugs.join(' ') === 'deadly_sequence sequence_burn toxic_sequence voltage_sequence',
+      `${modSlugs.join(' ')} ${quick.shot.seconds.toFixed(1)}s ${JSON.stringify(quick.shot.timings)}`);
+    // A real relic reward screen: the three prime parts priced, and the Forma Blueprint (not traded on
+    // warframe.market) shown as such instead of left out
+    quickCheck(new File([await (await fetch(`${MOCK}/relic-reward.png`)).blob()], 'relic-reward.png', { type: 'image/png' }));
+    await until(() => quick.shot?.name === 'relic-reward.png' && quick.shot.status === 'done' && !quick.loading, 120000, 'relic reward check');
+    const rewardSlugs = quick.items.map((q) => q.item.slug).sort();
+    const formaTile = [...document.querySelectorAll('#quickResults li')].find((li) => li.textContent.startsWith('Forma Blueprint'));
+    await report('relic reward screen: the three parts with prices, Forma shown as not on warframe.market',
+      rewardSlugs.join(' ') === 'forma_blueprint lex_prime_barrel octavia_prime_systems_blueprint paris_prime_lower_limb'
+      && /not on warframe.market/.test(formaTile?.textContent ?? '') && !state.prices.has('forma_blueprint||'),
+      `${rewardSlugs.join(' ')} ${quick.shot.seconds.toFixed(1)}s ${JSON.stringify(quick.shot.timings)}`);
+    await sleep(300); window.scrollTo(0, 0); await capture('relic-reward');
+    // Another one, where the chosen card is lighter and its name sits under bright art
+    quickCheck(new File([await (await fetch(`${MOCK}/relic-reward2.png`)).blob()], 'relic-reward2.png', { type: 'image/png' }));
+    await until(() => quick.shot?.name === 'relic-reward2.png' && quick.shot.status === 'done' && !quick.loading, 120000, 'second relic reward check');
+    const reward2 = quick.items.map((q) => q.item.slug).sort();
+    await report('second relic reward screen: all three parts', reward2.join(' ') === 'bronco_prime_barrel burston_prime_blueprint mesa_prime_chassis_blueprint',
+      `${reward2.join(' ')} ${quick.shot.seconds.toFixed(1)}s ${JSON.stringify(quick.shot.timings)}`);
+    document.getElementById('scanCategory').value = '';
+
+    // Screenshot button and shortcut. A canvas stands in for the shared screen (browsers only share a real one
+    // after a real click and a choice): a whole 1920×1080 screen with the reward screen on it.
+    const reward = await createImageBitmap(await (await fetch(`${MOCK}/relic-reward.png`)).blob());
+    const fakeScreen = Object.assign(document.createElement('canvas'), { width: 1920, height: 1080 });
+    const paintScreen = () => {
+      const g = fakeScreen.getContext('2d');
+      g.fillStyle = '#0b0f17';
+      g.fillRect(0, 0, 1920, 1080);
+      g.drawImage(reward, (1920 - reward.width) / 2, 330);
+    };
+    paintScreen();
+    const painter = setInterval(paintScreen, 200);
+    const realGetDisplayMedia = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+    navigator.mediaDevices.getDisplayMedia = async () => fakeScreen.captureStream(5);
+    const rewardSet = 'forma_blueprint lex_prime_barrel octavia_prime_systems_blueprint paris_prime_lower_limb';
+    document.getElementById('captureDelay').value = '1';
+    const pressed = Date.now();
+    document.getElementById('captureBtn').click();
+    await until(() => screenCapture.timer, 5000, 'countdown');
+    const countdown = document.getElementById('quickStatus').textContent;
+    await until(() => quick.shot?.name === 'screenshot.png' && quick.shot.status === 'done' && !quick.loading, 120000, 'screenshot check');
+    const shotSlugs = quick.items.map((q) => q.item.slug).sort().join(' ');
+    await sleep(300); window.scrollTo(0, 0); await capture('screenshot-check');
+    await report('screenshot button: shares the screen, waits the delay, checks the screenshot', realGetDisplayMedia && shotSlugs === rewardSet
+      && quick.shot.time - pressed >= 900 && countdown === 'Screenshot in 1…' && screenShared() && !document.getElementById('captureStop').hidden
+      && !document.getElementById('quickThumb').hidden && /^Screenshot from /.test(document.getElementById('quickStatus').textContent)
+      && /Shortcut: Ctrl\+Shift\+9/.test(document.getElementById('captureKey').textContent),
+      `${shotSlugs} | ${quick.shot.time - pressed} ms | "${countdown}" | ${quick.shot.img?.naturalWidth}x${quick.shot.img?.naturalHeight} | ${document.getElementById('captureKey').textContent}`);
+    // The shortcut goes through the background script, which only Firefox lets a test call (Chrome and Edge run it
+    // in a service worker): to the tab sharing a screen; with none sharing, the app comes up and says what to do.
+    const bg = browser.runtime.getBackgroundPage ? await browser.runtime.getBackgroundPage().catch(() => null) : null;
+    if (typeof browser.runtime.getBrowserInfo === 'function' && !bg?.onCommand) {
+      await report('screenshot shortcut: taken by the sharing tab; without one, the page says to share a screen first', false, 'no background page to call');
+    } else if (bg?.onCommand) {
+      const before = quick.shot;
+      document.getElementById('captureDelay').value = '0';
+      document.querySelector('.tabs [data-tab=inventory]').click();
+      await bg.onCommand('quick-capture');
+      await until(() => quick.shot !== before && quick.shot.status === 'done' && !quick.loading, 120000, 'shortcut screenshot');
+      const viaShortcut = quick.items.map((q) => q.item.slug).sort().join(' ');
+      const track = screenCapture.stream.getVideoTracks()[0];
+      document.getElementById('captureStop').click();
+      await bg.onCommand('quick-capture');
+      await until(() => screenCapture.help, 5000, 'shortcut without a shared screen');
+      await report('screenshot shortcut: taken by the sharing tab; without one, the page says to share a screen first',
+        viaShortcut === rewardSet && track.readyState === 'ended' && !screenShared() && !document.getElementById('tabQuick').hidden
+        && /Take screenshot/.test(document.getElementById('quickStatus').textContent) && document.getElementById('quickThumb').hidden,
+        `${viaShortcut} | ${document.getElementById('quickStatus').textContent}`);
+    }
+    clearInterval(painter);
+    delete navigator.mediaDevices.getDisplayMedia;
+
+    // Prices load only for what's on screen: nothing for a folded group or while on the quick tab
+    const unpricedRelic = state.items.find((i) => i.tags.includes('relic') && !i.vaulted && !state.inventory.some((e) => e.slug === i.slug) && !state.prices.has(`${i.slug}||intact`));
+    addEntries([{ slug: unpricedRelic.slug, qty: 1, rank: null, subtype: null }]);
+    await sleep(1500);
+    const relicKey = rowKey(state.inventory.find((e) => e.slug === unpricedRelic.slug));
+    const pricedWhileHidden = state.prices.has(relicKey) || state.loadingPrices.has(relicKey);
+    document.querySelector('.tabs [data-tab=inventory]').click();
+    await until(() => state.prices.get(relicKey)?.fetchedAt || state.prices.get(relicKey)?.error, 30000, 'priced after switching tabs');
+    const relicGroup = () => document.querySelector('#tableUnlisted tbody[data-group$=":relic"] tr.group-head');
+    const otherRelic = state.items.find((i) => i.tags.includes('relic') && !i.vaulted && !state.inventory.some((e) => e.slug === i.slug) && !state.prices.has(`${i.slug}||intact`));
+    relicGroup().click(); // fold Relics
+    addEntries([{ slug: otherRelic.slug, qty: 1, rank: null, subtype: null }]);
+    await sleep(1500);
+    const otherKey = rowKey(state.inventory.find((e) => e.slug === otherRelic.slug));
+    const pricedWhileFolded = state.prices.has(otherKey) || state.loadingPrices.has(otherKey);
+    relicGroup().click(); // unfold
+    await until(() => state.prices.get(otherKey)?.fetchedAt || state.prices.get(otherKey)?.error, 30000, 'priced after unfolding');
+    await report('prices load only for rows on screen (not on the quick tab, not in a folded group)', !pricedWhileHidden && !pricedWhileFolded,
+      `${unpricedRelic.slug} ${otherRelic.slug}`);
 
     // Logging out on the website is noticed
     await phase('need-logout');

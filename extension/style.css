@@ -64,6 +64,7 @@ kbd { background: var(--panel-3); border: 1px solid var(--border-strong); border
 @keyframes drift3 { to { transform: translate(-14vw, -26vh) scale(1.2); } }
 @keyframes twinkle { from { opacity: 0.25; } to { opacity: 0.55; } }
 html.no-motion .backdrop span, html.no-motion .backdrop::after { animation: none; }
+html.still .backdrop span, html.still .backdrop::after { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
   .backdrop span, .backdrop::after { animation: none; }
   * { transition: none !important; }
@@ -198,6 +199,33 @@ dialog::backdrop { background: rgba(5, 8, 16, 0.65); backdrop-filter: blur(3px);
 #dialogInput { width: 140px; margin-bottom: 14px; }
 .dialog-buttons { display: flex; flex-direction: row-reverse; gap: 8px; } /* OK comes first so Enter picks it */
 dialog.danger #dialogOk { background: linear-gradient(180deg, #f59a9a, var(--bad)); color: #2a0b0b; }
+
+/* ---------- tabs ---------- */
+.tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); justify-self: start; box-shadow: var(--shadow); }
+.tab { background: transparent; color: var(--muted); border: none; box-shadow: none; border-radius: 999px; padding: 7px 18px; font-weight: 600; }
+.tab:hover:not(.active) { color: var(--text); background: var(--panel-3); transform: none; filter: none; }
+.tab.active { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color: var(--accent-ink); }
+#tabInventory { display: grid; gap: 18px; }
+
+/* ---------- quick price check ---------- */
+.quick .dropzone { padding: 34px 16px; }
+.quick-lang { display: flex; align-items: center; gap: 8px; }
+.capture-bar { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; margin-top: 14px; }
+#captureBtn { display: inline-flex; align-items: center; gap: 8px; }
+.btn-icon { width: 18px; height: 18px; flex: none; }
+#captureKey kbd { margin: 0 2px; }
+#captureHint { margin: 8px 0 0; }
+.quick-shot { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+.quick-shot img { height: 64px; max-width: 150px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border-strong); }
+#quickStatus { margin: 0; }
+.quick-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.quick-list li { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); animation: rise 0.3s ease backwards; }
+.quick-list img, .quick-list .thumb-missing { width: 32px; height: 32px; object-fit: contain; flex: none; }
+.quick-name { flex: 1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.quick-values { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.2; }
+.quick-price { font-size: 18px; font-variant-numeric: tabular-nums; }
+.quick-ducats { font-size: 12.5px; font-variant-numeric: tabular-nums; }
+#quickNote { margin: 10px 0 0; }
 
 /* ---------- welcome ---------- */
 .welcome h2 { font-size: 20px; margin-bottom: 4px; }

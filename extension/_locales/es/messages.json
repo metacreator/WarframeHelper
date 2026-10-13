@@ -10,5 +10,9 @@
   "actionTitle": {
     "message": "Abrir Tenno Trade Helper",
     "description": "Tooltip of the toolbar button"
+  },
+  "commandQuickCapture": {
+    "message": "Consulta rápida de precios: captura de la pantalla del juego",
+    "description": "The keyboard shortcut, as listed in the browser's shortcut settings"
   }
 }

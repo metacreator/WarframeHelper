@@ -53,6 +53,45 @@
   </div>
 
   <main>
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab" role="tab" data-tab="inventory" data-i18n>My items</button>
+      <button type="button" class="tab" role="tab" data-tab="quick" data-i18n>Quick price check</button>
+    </nav>
+
+    <!-- Quick price check: one screenshot in, the lowest price of each item on it out. Nothing is stored. -->
+    <section id="tabQuick" class="card quick" hidden>
+      <div class="card-head">
+        <h2 data-i18n>Quick price check</h2>
+        <div class="quick-lang">
+          <label title="The language your game is set to: item names are read in that language" data-i18n data-i18n-attr="title">Game language
+            <select id="quickLang"></select>
+          </label>
+        </div>
+      </div>
+      <div id="quickDrop" class="dropzone">
+        <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="drop-title" data-i18n>Paste a screenshot with <kbd>Ctrl</kbd>+<kbd>V</kbd>, drop it here, or click to choose one</span>
+        <span class="hint" data-i18n>You get the lowest online price of each item on it. Nothing is added to your list.</span>
+        <input id="quickFile" type="file" accept="image/*" hidden>
+      </div>
+      <!-- Or a screenshot of the screen the game is on, taken after a short delay (scan.js, "screenshot shortcut") -->
+      <div id="captureBar" class="capture-bar">
+        <button id="captureBtn" type="button" data-i18n><svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.7l1.4-2h4.8l1.4 2h1.7A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="12" cy="12.4" r="3.3" fill="none" stroke="currentColor" stroke-width="1.7"/></svg> Take screenshot</button>
+        <label title="Time to switch to the game before the screenshot is taken" data-i18n data-i18n-attr="title">Delay <select id="captureDelay"></select></label>
+        <span id="captureKey" class="hint"></span>
+        <span class="spacer"></span>
+        <button id="captureStop" type="button" class="secondary small" hidden data-i18n>Stop sharing</button>
+      </div>
+      <p id="captureHint" class="hint"></p>
+      <div id="quickShot" class="quick-shot" hidden>
+        <img id="quickThumb" alt="" hidden>
+        <p id="quickStatus" class="hint"></p>
+      </div>
+      <ol id="quickResults" class="quick-list"></ol>
+      <p id="quickNote" class="hint" hidden></p>
+    </section>
+
+    <div id="tabInventory">
     <section id="welcome" class="card welcome" hidden>
       <h2 data-i18n>Welcome, Tenno!</h2>
       <p class="hint" data-i18n>Three steps to turn what you don't need into platinum:</p>
@@ -253,6 +292,7 @@
           <span id="backupResult" class="hint"></span>
         </div>
       </details>
+    </div>
     </div>
   </main>
 

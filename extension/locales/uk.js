@@ -303,13 +303,6 @@ LOCALES.uk = {
   'Added {n} items from screenshots.': ukPlural('Додано {n} предмет зі знімків.', 'Додано {n} предмети зі знімків.', 'Додано {n} предметів зі знімків.'),
   'Items without a visible count kept the quantity they had.': 'Предмети без видимої кількості зберегли попередню кількість.',
 
-  // ---- notifications ----
-  'Sold: {qty}× {name}': 'Продано: {qty}× {name}',
-  '{n} items sold': ukPlural('Продано {n} предмет', 'Продано {n} предмети', 'Продано {n} предметів'),
-  '{total}p. Removed from your list.': '{total}p. Прибрано з вашого списку.',
-  'Listing gone: {name}': 'Оголошення зникло: {name}',
-  '{n} listings disappeared': ukPlural('Зникло {n} оголошення', 'Зникли {n} оголошення', 'Зникли {n} оголошень'),
-  'Open Tenno Trade Helper to confirm whether they sold.': 'Відкрийте Tenno Trade Helper, щоб підтвердити, чи їх продано.',
 
   // ---- layout ----
   'More actions': 'Інші дії',
@@ -329,4 +322,33 @@ LOCALES.uk = {
   '+ Add item': '+ Додати предмет',
   'OK': 'OK',
   'Cancel': 'Скасувати',
+
+  // ---- quick price check ----
+  'not on warframe.market': 'немає на warframe.market',
+  'My items': 'Мої предмети',
+  'Quick price check': 'Швидка перевірка цін',
+  'Paste a screenshot with {0}+{1}, drop it here, or click to choose one': 'Вставте знімок через {0}+{1}, перетягніть його сюди або натисніть, щоб вибрати',
+  'You get the lowest online price of each item on it. Nothing is added to your list.': 'Ви побачите найнижчу ціну онлайн для кожного предмета на ньому. До вашого списку нічого не додається.',
+  'Reading the screenshot… {n}%': 'Читання знімка… {n}%',
+  'Checking prices…': 'Перевірка цін…',
+  'No items found on this screenshot.': 'На цьому знімку не знайдено предметів.',
+  'rank 0': 'ранг 0',
+  "{n} names couldn't be read for sure, so they're left out.": { one: '{n} назву не вдалося точно прочитати, тому її пропущено.', few: '{n} назви не вдалося точно прочитати, тому їх пропущено.', many: '{n} назв не вдалося точно прочитати, тому їх пропущено.', other: '{n} назв не вдалося точно прочитати, тому їх пропущено.' },
+
+  // ---- screenshot shortcut ----
+  '{0} Take screenshot': '{0} Зробити знімок',
+  'Delay {0}': 'Затримка {0}',
+  'Time to switch to the game before the screenshot is taken': 'Час, щоб перейти до гри, перш ніж буде зроблено знімок',
+  'Stop sharing': 'Припинити показ екрана',
+  'Shortcut:': 'Комбінація клавіш:',
+  'not set': 'не задано',
+  'works while the browser is in front': 'працює, коли браузер на передньому плані',
+  'works in the game too': 'працює й у грі',
+  'change': 'змінити',
+  'Sharing your screen with this page. Screenshots never leave this computer.': 'Ця сторінка бачить ваш екран. Знімки нікуди не надсилаються з цього комп’ютера.',
+  'The first time, your browser asks which screen to share: pick the one the game is on.': 'Першого разу браузер запитає, яким екраном поділитися: виберіть той, де гра.',
+  'Screenshot in {n}…': 'Знімок через {n}…',
+  'Click "Take screenshot" first, so your browser can ask which screen to share.': 'Спершу натисніть «Зробити знімок», щоб браузер запитав, яким екраном поділитися.',
+  "The screen wasn't shared.": 'Доступ до екрана не надано.',
+  'Screenshot from {time}': 'Знімок о {time}',
 };

@@ -10,5 +10,9 @@
   "actionTitle": {
     "message": "打开 Tenno Trade Helper",
     "description": "Tooltip of the toolbar button"
+  },
+  "commandQuickCapture": {
+    "message": "快速查价：截取游戏画面",
+    "description": "The keyboard shortcut, as listed in the browser's shortcut settings"
   }
 }

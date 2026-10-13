@@ -299,13 +299,6 @@ LOCALES['zh-hant'] = {
   'Added {n} items from screenshots.': '已從截圖加入 {n} 件物品。',
   'Items without a visible count kept the quantity they had.': '看不到數量的物品保持了原有數量。',
 
-  // ---- notifications ----
-  'Sold: {qty}× {name}': '已售出：{qty}× {name}',
-  '{n} items sold': '已售出 {n} 件物品',
-  '{total}p. Removed from your list.': '{total}p。已從清單中移除。',
-  'Listing gone: {name}': '掛單消失：{name}',
-  '{n} listings disappeared': '{n} 筆掛單消失了',
-  'Open Tenno Trade Helper to confirm whether they sold.': '開啟 Tenno Trade Helper 確認是否已售出。',
 
   // ---- layout ----
   'More actions': '更多操作',
@@ -325,4 +318,33 @@ LOCALES['zh-hant'] = {
   '+ Add item': '+ 加入物品',
   'OK': '確定',
   'Cancel': '取消',
+
+  // ---- quick price check ----
+  'not on warframe.market': '不在 warframe.market 上販售',
+  'My items': '我的物品',
+  'Quick price check': '快速查價',
+  'Paste a screenshot with {0}+{1}, drop it here, or click to choose one': '用 {0}+{1} 貼上截圖，拖曳到這裡，或點擊選擇一張',
+  'You get the lowest online price of each item on it. Nothing is added to your list.': '顯示截圖中每件物品的線上最低價。不會加入你的清單。',
+  'Reading the screenshot… {n}%': '正在辨識截圖… {n}%',
+  'Checking prices…': '正在查詢價格…',
+  'No items found on this screenshot.': '這張截圖中沒有找到物品。',
+  'rank 0': '0 級',
+  "{n} names couldn't be read for sure, so they're left out.": '有 {n} 個名稱無法確定，已略過。',
+
+  // ---- screenshot shortcut ----
+  '{0} Take screenshot': '{0} 截圖',
+  'Delay {0}': '延遲 {0}',
+  'Time to switch to the game before the screenshot is taken': '截圖前切換到遊戲的時間',
+  'Stop sharing': '停止分享',
+  'Shortcut:': '快速鍵：',
+  'not set': '未設定',
+  'works while the browser is in front': '瀏覽器在前景時有效',
+  'works in the game too': '在遊戲中也有效',
+  'change': '變更',
+  'Sharing your screen with this page. Screenshots never leave this computer.': '正在與此頁面分享螢幕。截圖不會離開這台電腦。',
+  'The first time, your browser asks which screen to share: pick the one the game is on.': '第一次使用時，瀏覽器會詢問要分享哪個螢幕：請選擇遊戲所在的螢幕。',
+  'Screenshot in {n}…': '{n} 秒後截圖…',
+  'Click "Take screenshot" first, so your browser can ask which screen to share.': '請先點擊「截圖」，讓瀏覽器詢問要分享哪個螢幕。',
+  "The screen wasn't shared.": '未分享螢幕。',
+  'Screenshot from {time}': '截圖時間：{time}',
 };

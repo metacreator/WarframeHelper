@@ -1,5 +1,5 @@
 'use strict';
-/* global browser, Backend, h, fill, t, tk, setPageLang, guessLanguage, translatePage, PAGE_LANGS */
+/* global browser, Backend, h, fill, t, tk, setPageLang, guessLanguage, translatePage, PAGE_LANGS, captureSoon, screenShared */
 
 const ASSETS = 'https://warframe.market/static/assets/';
 const $ = (sel) => document.querySelector(sel);
@@ -160,7 +160,6 @@ async function reloadInventory() {
 // except for entries marked qtyKnown: false (no count was visible on the screenshot): those keep theirs.
 function addEntries(entries, { replace = false, setQty = false } = {}) {
   if (replace) state.inventory = [];
-  const added = [];
   for (const raw of entries) {
     if (!state.bySlug.has(raw.slug)) continue;
     const e = normalizeEntry(raw);
@@ -176,11 +175,10 @@ function addEntries(entries, { replace = false, setQty = false } = {}) {
       else if (raw.qtyKnown !== false) existing.qty = e.qty;
       existing.rankKnown ||= e.rankKnown;
       Object.assign(existing, normalizeEntry(existing)); // keeps "List qty" within a lowered quantity
-    } else { state.inventory.push(e); added.push(e); }
+    } else state.inventory.push(e);
   }
   saveInventory();
-  render();
-  fetchPrices(added);
+  render(); // prices for new rows load once they're on screen
 }
 
 // Lowers an item's quantity after a sale; the row disappears when none are left.
@@ -223,6 +221,7 @@ async function loadCachedPrices() {
 
 async function fetchPrice(entry, force = false) {
   const key = rowKey(entry);
+  lastTry.set(key, Date.now());
   state.loadingPrices.add(key);
   try {
     state.prices.set(key, await Backend.getPrice(entry.slug, entry.rank, entry.subtype, force));
@@ -270,9 +269,10 @@ async function loadCachedStats() {
 async function fetchStats(entries) {
   const slugs = [...new Set(entries.map((e) => e.slug))].filter((slug) => {
     const s = state.stats.get(slug);
-    return !state.loadingStats.has(slug) && (!s || Date.now() - s.fetchedAt > Backend.STATS_TTL);
+    return !state.loadingStats.has(slug) && (!s || Date.now() - s.fetchedAt > Backend.STATS_TTL)
+      && Date.now() - (lastTry.get(`stats:${slug}`) ?? 0) > RETRY_MS;
   });
-  slugs.forEach((slug) => state.loadingStats.add(slug));
+  slugs.forEach((slug) => { state.loadingStats.add(slug); lastTry.set(`stats:${slug}`, Date.now()); });
   for (const slug of slugs) {
     try {
       state.stats.set(slug, await Backend.getStats(slug));
@@ -280,6 +280,39 @@ async function fetchStats(entries) {
     state.loadingStats.delete(slug);
     renderSoon();
   }
+}
+
+// ---------- only the rows on screen are priced ----------
+
+// Prices and trade history are fetched for the rows you can see: the "My items" tab open, with the row's
+// section and type group unfolded. Opening more of the list (or switching tabs) fetches those then.
+// A failed fetch waits a couple of minutes before the next try, so an outage doesn't turn into a flood.
+const RETRY_MS = 2 * 60 * 1000;
+const lastTry = new Map(); // rowKey, or "stats:<slug>" -> when it was last asked for
+
+function onScreen(r) {
+  if (activeTab() !== 'inventory') return false;
+  const listed = r.listing || r.e.gone;
+  if (!$(listed ? '#listedSection' : '#unlistedSection').open) return false;
+  const group = GROUPS.find((g) => g.categories.includes(r.category));
+  return !foldedGroups.has(`${listed ? 'tableListed' : 'tableUnlisted'}:${group.key}`);
+}
+const visibleEntries = () => filteredRows().filter(onScreen).map((r) => r.e);
+
+// Runs after every render and whenever more of the list comes into view: fetches what's missing or stale.
+let visibleTimer = null;
+function fetchVisibleSoon() {
+  clearTimeout(visibleTimer);
+  visibleTimer = setTimeout(() => {
+    if (!state.items.length) return;
+    const entries = visibleEntries();
+    const due = entries.filter((e) => {
+      const key = rowKey(e);
+      return isStale(state.prices.get(key)) && !state.loadingPrices.has(key) && Date.now() - (lastTry.get(key) ?? 0) > RETRY_MS;
+    });
+    if (due.length) fetchPrices(due);
+    else fetchStats(entries);
+  }, 100);
 }
 
 // Trades of this exact rank / refinement over the last 7 days: volume-weighted average price and volume.
@@ -303,7 +336,7 @@ async function refreshAll() {
   try {
     const force = $('#forceRefresh').checked;
     await loadListings(true);
-    await fetchPrices(state.inventory, { refetch: true, force });
+    await fetchPrices(visibleEntries(), { refetch: true, force }); // what you can see; the rest when you open it
     await computeSets();
   } finally {
     state.refreshing = false;
@@ -396,7 +429,6 @@ function addMissingListedItems() {
   if (!missing.length) return;
   state.inventory.push(...missing);
   saveInventory();
-  fetchPrices(missing);
   setStatus(t('Added {n} items you have listed on warframe.market.', { n: missing.length }));
 }
 
@@ -1018,10 +1050,11 @@ function render() {
   $('#goneBanner').hidden = gone === 0;
   $('#goneBanner').textContent = t('{n} of your listings disappeared from warframe.market without this add-on removing them. If you sold them, click "Yes, sold" on the row to remove them from your list.', { n: gone });
 
-  const fetched = state.inventory.map((e) => state.prices.get(rowKey(e))?.fetchedAt).filter(Boolean);
+  const fetched = rows.filter(onScreen).map((r) => r.price?.fetchedAt).filter(Boolean);
   $('#priceAge').textContent = fetched.length ? t('Oldest price: {ago}', { ago: ago(Math.min(...fetched)) }) : '';
 
   renderTradeMessage(rows);
+  fetchVisibleSoon();
 }
 
 // Trade chat is shared by players of every language, so the message uses the English item names.
@@ -1041,7 +1074,11 @@ function renderTradeMessage(rows) {
 
 // ---------- complete sets ----------
 
+let setsPending = false;
 async function computeSets() {
+  // Worked out on the "My items" tab only, as it fetches set data and prices; switching there catches up.
+  if (activeTab() !== 'inventory') { setsPending = true; return; }
+  setsPending = false;
   const owned = new Map();
   for (const e of state.inventory) {
     if (category(state.bySlug.get(e.slug)) !== 'Prime Part') continue;
@@ -1108,7 +1145,7 @@ async function importBackup(file) {
     await reloadInventory();
     await loadSales();
     render();
-    fetchPrices(state.inventory).then(computeSets);
+    computeSets();
     $('#backupResult').textContent = t('Loaded {items} items and {sales} sales.', { items: res.inventory, sales: res.sales });
   } catch (err) {
     $('#backupResult').textContent = t('Could not load that file: {error}', { error: errText(err) });
@@ -1216,6 +1253,22 @@ function placeMenu(details) {
   if (anchor.bottom + 6 + height > window.innerHeight - 8 && anchor.top - height - 6 > 8) list.style.top = `${anchor.top - height - 6}px`;
 }
 
+// ---------- tabs: your items, or a quick price check of one screenshot ----------
+
+const activeTab = () => ($('#tabQuick').hidden ? 'inventory' : 'quick');
+
+function showTab(name) {
+  $('#tabInventory').hidden = name !== 'inventory';
+  $('#tabQuick').hidden = name !== 'quick';
+  document.querySelectorAll('.tabs .tab').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tab === name);
+    b.setAttribute('aria-selected', String(b.dataset.tab === name));
+  });
+  storageSet('tab', name);
+  fetchVisibleSoon();
+  if (name === 'inventory' && setsPending) computeSets();
+}
+
 function wireMenus() {
   document.addEventListener('toggle', (ev) => {
     const details = ev.target;
@@ -1243,6 +1296,11 @@ function wireMenus() {
 
 function wireEvents() {
   wireMenus();
+  document.querySelector('.tabs').addEventListener('click', (ev) => {
+    const tab = ev.target.closest('[data-tab]')?.dataset.tab;
+    if (tab) showTab(tab);
+  });
+  showTab(storageGet('tab', 'inventory') === 'quick' ? 'quick' : 'inventory');
 
   // Animated background, on unless switched off here (or the system asks for less motion).
   const motion = $('#motionToggle');
@@ -1252,6 +1310,12 @@ function wireEvents() {
     storageSet('motion', motion.checked ? 'on' : 'off');
     document.documentElement.classList.toggle('no-motion', !motion.checked);
   });
+  // It stands still while the browser isn't the active window (say, the page is on a second screen while you
+  // play), so it doesn't keep the graphics card busy for nobody.
+  const still = () => document.documentElement.classList.toggle('still', !document.hasFocus());
+  window.addEventListener('blur', still);
+  window.addEventListener('focus', still);
+  still();
 
   $('#columnMenu').addEventListener('change', (ev) => {
     const key = ev.target.dataset.column;
@@ -1309,7 +1373,7 @@ function wireEvents() {
   // Two foldable item tables with the same columns; remember which ones you folded.
   for (const section of document.querySelectorAll('.item-section')) {
     section.open = storageGet(`fold:${section.id}`, 'open') === 'open';
-    section.addEventListener('toggle', () => storageSet(`fold:${section.id}`, section.open ? 'open' : 'closed'));
+    section.addEventListener('toggle', () => { storageSet(`fold:${section.id}`, section.open ? 'open' : 'closed'); fetchVisibleSoon(); });
   }
 
   // Row controls in both tables (on the table: its header and groups are rebuilt).
@@ -1328,6 +1392,7 @@ function wireEvents() {
       storageSet('foldedGroups', JSON.stringify([...foldedGroups]));
       head.closest('tbody').classList.toggle('folded', foldedGroups.has(id));
       head.setAttribute('aria-expanded', String(!foldedGroups.has(id)));
+      fetchVisibleSoon();
     });
     // Group rows fold from the keyboard too (Enter or Space), like the sections.
     table.addEventListener('keydown', (ev) => {
@@ -1394,7 +1459,7 @@ function wireEvents() {
     state.stats.clear();
     render();
     await loadListings(true);
-    fetchPrices(state.inventory).then(computeSets);
+    computeSets();
   });
 
   const langSelect = $('#pageLang');
@@ -1418,10 +1483,14 @@ function wireEvents() {
         browser.tabs.update(tab.id, { active: true });
         browser.windows.update(tab.windowId, { focused: true });
       });
+      if (msg.capture) captureSoon(); // the screenshot shortcut, with no screen shared yet: says what to do
       sendResponse(true);
     }
-    if (msg?.type === 'check-orders') {
-      loadListings(true);
+    // The screenshot shortcut, answered by the tab sharing a screen. The tab comes to the front of its window, but
+    // the window stays where it is: in front of the game, it would be in the screenshot.
+    if (msg?.type === 'quick-capture' && screenShared()) {
+      browser.tabs.getCurrent().then((tab) => browser.tabs.update(tab.id, { active: true }));
+      captureSoon();
       sendResponse(true);
     }
     return false;
@@ -1458,7 +1527,7 @@ async function init() {
       $('#pageLang').syncPicker();
       renderTexts();
     } else if (!state.settings.pageLang) {
-      await Backend.updateSettings({ pageLang: pageLangCode() }); // so notifications use it too
+      await Backend.updateSettings({ pageLang: pageLangCode() });
     }
     await loadAuth();
     if (state.auth.reason === 'no-access') { setStatus(t('Waiting for access to warframe.market.')); return; }
@@ -1478,11 +1547,21 @@ async function init() {
     render();
 
     await Promise.all([loadListings(), loadSales()]);
-    await fetchPrices(state.inventory); // only the stale ones
-    await computeSets();
+    await computeSets(); // prices load as rows come on screen (render → fetchVisibleSoon)
+    keepUpToDate();
   } catch (err) {
     setStatus(t('Startup failed: {error}', { error: errText(err) }));
   }
+}
+
+// While this page is open: sales made on the website are picked up every few minutes, and each price on screen
+// is fetched again once it's an hour old (or straight away with "Refresh prices"). These timers belong to the
+// page, so they stop when it's closed; the add-on does nothing in the background.
+const ORDER_CHECK_MS = 3 * 60 * 1000;
+const PRICE_CHECK_MS = 5 * 60 * 1000; // how often to look for prices that turned an hour old
+function keepUpToDate() {
+  setInterval(() => { if (state.auth.connected && !state.refreshing) loadListings(true); }, ORDER_CHECK_MS);
+  setInterval(fetchVisibleSoon, PRICE_CHECK_MS);
 }
 
 init();

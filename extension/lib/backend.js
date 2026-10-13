@@ -9,7 +9,7 @@ const Backend = (() => {
   const SITE = 'https://warframe.market';
   const ITEMS_TTL = 24 * 60 * 60 * 1000;
   const ORDERS_TTL = 60 * 1000;
-  const PRICE_TTL_MINUTES = 30;
+  const PRICE_TTL_MINUTES = 60; // prices are fetched again once they are an hour old
   const MIN_GAP_MS = 350; // stays under warframe.market's 3 requests/second
 
   // ---------- storage ----------
@@ -224,12 +224,22 @@ const Backend = (() => {
     return { key: `${slug}?${params}`, qs: params.toString() };
   }
 
+  // The same request asked for twice at once (the list and a quick price check, say) goes out once.
+  const inflight = new Map();
+  function once(key, run) {
+    if (!inflight.has(key)) inflight.set(key, run().finally(() => inflight.delete(key)));
+    return inflight.get(key);
+  }
+
   async function getPrice(slug, rank, subtype, force = false) {
     await loadPrices();
     const { key, qs } = priceKey(slug, rank, subtype);
     const cached = prices[key];
     if (!force && cached && Date.now() - cached.fetchedAt < PRICE_TTL_MINUTES * 60 * 1000) return cached;
+    return once(`price:${key}`, () => fetchPrice(slug, key, qs));
+  }
 
+  async function fetchPrice(slug, key, qs) {
     const top = await wfm(`/v2/orders/item/${encodeURIComponent(slug)}/top${qs ? '?' + qs : ''}`);
     // "top" returns the best orders from users who are currently online / in game.
     const sells = top.sell.map((o) => o.platinum).sort((a, b) => a - b);
@@ -273,6 +283,10 @@ const Backend = (() => {
     stats ??= await store.get('stats', {});
     const cached = stats[slug];
     if (!force && cached && Date.now() - cached.fetchedAt < STATS_TTL) return cached;
+    return once(`stats:${slug}`, () => fetchStats(slug));
+  }
+
+  async function fetchStats(slug) {
     const res = await upstream('GET', `/v1/items/${encodeURIComponent(slug)}/statistics`);
     if (!res.ok) throw httpError(res.status, describeError(res.body, res.status));
     const since = Date.now() - STATS_DAYS * 24 * 60 * 60 * 1000;

@@ -6,8 +6,6 @@ LOCALES.en = {
   '{n} sales': { one: '{n} sale', other: '{n} sales' },
   '{n} ducats': { one: '{n} ducat', other: '{n} ducats' },
   '{n} days ago': { one: '{n} day ago', other: '{n} days ago' },
-  '{n} items sold': { one: '{n} item sold', other: '{n} items sold' },
-  '{n} listings disappeared': { one: '{n} listing disappeared', other: '{n} listings disappeared' },
   '{n} listings disappeared from warframe.market. Did they sell?': { one: '{n} listing disappeared from warframe.market. Did it sell?', other: '{n} listings disappeared from warframe.market. Did they sell?' },
   '{n} unrecognised texts': { one: '{n} unrecognised text', other: '{n} unrecognised texts' },
   '{n} traded in the last 7 days': { other: '{n} traded in the last 7 days' },
@@ -25,4 +23,7 @@ LOCALES.en = {
     one: '{n} of your listings disappeared from warframe.market without this add-on removing it. If you sold it, click "Yes, sold" on the row to remove it from your list.',
     other: '{n} of your listings disappeared from warframe.market without this add-on removing them. If you sold them, click "Yes, sold" on the row to remove them from your list.',
   },
+
+  // ---- quick price check ----
+  "{n} names couldn't be read for sure, so they're left out.": { one: "{n} name couldn't be read for sure, so it's left out.", other: "{n} names couldn't be read for sure, so they're left out." },
 };

@@ -64,8 +64,9 @@ Raise `version` in `manifest.json` for every release, and note the changes in `.
 
 Listing text and privacy policy for all stores: `STORE_LISTING.md` and `../PRIVACY.md`.
 
-`npm run lint` currently reports no errors and 5 warnings, all about the `Function` constructor inside the
-bundled Tesseract library. The page itself never builds HTML from strings: `lib/dom.js` creates elements and
+`npm run lint` currently reports no errors and 8 warnings: 5 about the `Function` constructor inside the
+bundled Tesseract library, and 3 saying `commands.openShortcutSettings` is unsupported. That API is newer than the
+linter bundled with web-ext 8.3.0 (Firefox 137+); the code checks it exists before using it. The page itself never builds HTML from strings: `lib/dom.js` creates elements and
 sets text directly, so text from warframe.market or a screenshot can never become markup.
 
 ## Testing
@@ -89,15 +90,15 @@ The translations were written without a native speaker's review, so corrections 
 | File | Role |
 | --- | --- |
 | `app.html`, `app.js`, `style.css` | The app page (opens in a tab) |
-| `scan.js` | Screenshot reading with the bundled Tesseract OCR: game in English, Ukrainian, Spanish or Chinese, stack counts, relic refinement, two screenshots at a time |
+| `scan.js` | Screenshot reading with the bundled Tesseract OCR: game in English, Ukrainian, Spanish or Chinese, stack counts, relic refinement, two screenshots at a time, each split across a shared pool of up to four OCR workers (stopped after 10 idle minutes). Also the quick price check and its screenshot shortcut (a screen shared with the page; the shortcut waits the chosen delay, then grabs a frame) |
 | `lib/backend.js` | warframe.market requests (rate-limited to 3/s), caching in `browser.storage.local`, login from the `JWT` cookie, sale detection, price history |
 | `lib/dom.js` | Builds page elements without HTML strings |
 | `lib/i18n.js`, `locales/` | Page translations |
 | `lib/compat.js` | Lets the same code use `browser.*` in Chrome and Edge |
-| `background.js` | Toolbar button, opens the app after install, checks for sales every 3 minutes and shows a notification |
+| `background.js` | Toolbar button, opens the app after install, passes the screenshot shortcut (Ctrl+Shift+9) to the app tab. No timers: it's unloaded between uses. The order check (every 3 minutes) and hourly price refresh run in the app page, only while it's open |
 | `_locales/` | Add-on name and description in each language (stores, add-on manager) |
 | `vendor/tesseract/` | Unmodified OCR library and language data (English, Ukrainian, Spanish, Simplified and Traditional Chinese) |
 
 Permissions: `cookies` + access to `warframe.market` to read your login there; `api.warframe.market` for prices,
-trade history and orders; `storage`/`unlimitedStorage` for your list, sales history and the caches; `alarms` and
-`notifications` for the background sale check.
+trade history and orders; `storage`/`unlimitedStorage` for your list, sales history and the caches. No `alarms` or
+`notifications`: the add-on does nothing in the background.
